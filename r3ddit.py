@@ -124,9 +124,8 @@ def main():
         # --- פרטי המייל ---
         SENDER_EMAIL = "iadam314@gmail.com"
 
-        # כאן השינוי החשוב! מוחקים את הסיסמה הגלויה ומשתמשים במשתנה סביבה
-        APP_PASSWORD = os.environ.get("elvtghanwpbeiael")
-
+        # זה השם של ה"מגירה" שהגדרנו בקובץ ה-bat
+        APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD")
         RECEIVER_EMAIL = "iadam314@gmail.com"
 
 
