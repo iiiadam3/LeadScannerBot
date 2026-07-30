@@ -5,31 +5,30 @@ on:
     # שעון השרתים של גיטהאב הוא ב-UTC.
     # השעה 05:00 ב-UTC שווה ל-08:00 בבוקר שעון ישראל (שעון קיץ)
     - cron: '0 5 * * *'
-  workflow_dispatch: # זה כפתור קסם שמאפשר לך להריץ את הקוד ידנית מתי שתרצה לבדיקה
+  workflow_dispatch: # כפתור הרצה ידנית לבדיקות
 
 jobs:
   run-scanner:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.12'
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-    - name: Run Reddit Scanner
-      env:
-       env:
-  DATABASE_URL: ${{ secrets.DATABASE_URL }}
-  GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
-  TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-  TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      run: python r3ddit.py
+      - name: Run Reddit Scanner
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python r3ddit.py
