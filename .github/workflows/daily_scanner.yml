@@ -27,6 +27,9 @@ jobs:
 
     - name: Run Reddit Scanner
       env:
-        # כאן השרת שואב את הסיסמה מהכספת של גיטהאב ומעביר אותה לקוד פייתון
-        GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+       env:
+  DATABASE_URL: ${{ secrets.DATABASE_URL }}
+  GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+  TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+  TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       run: python r3ddit.py
