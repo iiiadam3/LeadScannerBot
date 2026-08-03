@@ -2,10 +2,9 @@ name: Daily Reddit Lead Scanner
 
 on:
   schedule:
-    # שעון השרתים של גיטהאב הוא ב-UTC.
-    # השעה 05:00 ב-UTC שווה ל-08:00 בבוקר שעון ישראל (שעון קיץ)
-    - cron: '0 5 * * *'
-  workflow_dispatch: # כפתור הרצה ידנית לבדיקות
+    # הקוד ירוץ כל 3 שעות מסביב לשעון
+    - cron: '0 */3 * * *'
+  workflow_dispatch:
 
 jobs:
   run-scanner:
