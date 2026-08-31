@@ -27,6 +27,37 @@ CREATE TABLE IF NOT EXISTS leads (
 ''')
 conn.commit()
 
+import requests
+import os
+
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+
+def get_ai_score(title, description):
+    if not OPENAI_API_KEY:
+        return 0
+        
+    url = "https://api.openai.com/v1/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {OPENAI_API_KEY}"
+    }
+    
+    # הפרומפט שקובע כמה ה-AI יהיה מדויק
+    prompt = f"You are a lead scoring bot for a freelancer. Rate the intent of this Reddit post to hire or pay for a digital service (like web dev or design) from 1 to 10. Return ONLY the number. Title: {title}. Content: {description}"
+    
+    data = {
+        "model": "gpt-4o-mini",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.2
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        score = int(response.json()['choices'][0]['message']['content'].strip())
+        return score
+    except Exception as e:
+        print("AI Error:", e)
+        return 1 # אם יש שגיאה, הציון יהיה נמוך כדי לא להספים אותך
 
 # ==========================================
 # --- פונקציה: שליחת התראה ל-Telegram ---
@@ -78,6 +109,8 @@ def get_reddit_leads_bypass(subreddit_name, intent_keywords, context_keywords, n
             title = entry.get('title', '').lower()
             text = entry.get('summary', '').lower()
             content = title + " " + text
+            
+            ai_score = get_ai_score(entry.title, entry.description)
 
             # סינון חכם
             contains_intent = any(keyword in content for keyword in intent_keywords)
@@ -96,6 +129,19 @@ def get_reddit_leads_bypass(subreddit_name, intent_keywords, context_keywords, n
                 VALUES (%s, %s, %s, %s)
                 ON CONFLICT (link) DO NOTHING
                 ''', (lead_date, lead_title, lead_link, lead_score))
+
+                # 1. שמירה למסד הנתונים בכל מקרה (כדי שלא נזרוק לפח מידע)
+                cursor.execute(
+                    "INSERT INTO leads (title, link, ai_score) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+                    (entry.title, entry.link, ai_score)
+                )
+                conn.commit()
+        
+                # 2. שליחה לטלגרם רק אם ה-AI קבע שזה ליד חם!
+                if ai_score >= 7:
+                    message = f"🔥 ליד חם! (ציון: {ai_score})\n\n{entry.title}\n{entry.link}"
+                    # פה מגיעה השורה הקיימת שלך ששולחת את ההודעה לטלגרם
+                    send_telegram_message(message)
 
                 # אם הליד חדש לחלוטין (ולא נשמר בעבר)
                 if cursor.rowcount > 0:
