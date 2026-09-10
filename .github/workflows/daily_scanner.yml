@@ -2,7 +2,7 @@ name: Daily Reddit Lead Scanner
 
 on:
   schedule:
-    # הקוד ירוץ כל 3 שעות מסביב לשעון
+    # הקוד ירוץ כל 4 שעות 
     - cron: '0 */4 * * *'
   workflow_dispatch:
 
@@ -23,6 +23,14 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
+      - name: Debug Secret Check
+        run: |
+          if [ -z "${{ secrets.OPENAI_API_KEY }}" ]; then
+            echo "DEBUG: The secret is EMPTY! GitHub cannot find it."
+          else
+            echo "DEBUG: The secret is loaded successfully."
+          fi
 
       - name: Run Reddit Scanner
         env:
