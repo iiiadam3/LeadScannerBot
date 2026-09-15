@@ -147,12 +147,6 @@ def get_reddit_leads_bypass(subreddit_name, intent_keywords, context_keywords, n
 
             conn.commit()
         
-                # 2. שליחה לטלגרם רק אם ה-AI קבע שזה ליד חם!
-                if ai_score >= 7:
-                    message = f"🔥 ליד חם! (ציון: {ai_score})\n\n{entry.title}\n{entry.link}"
-                    # פה מגיעה השורה הקיימת שלך ששולחת את ההודעה לטלגרם
-                    send_telegram_message(message)
-
                 # אם הליד חדש לחלוטין (ולא נשמר בעבר)
                 if cursor.rowcount > 0:
                     leads.append({
@@ -161,8 +155,11 @@ def get_reddit_leads_bypass(subreddit_name, intent_keywords, context_keywords, n
                         "Link": lead_link,
                         "Score": lead_score
                     })
-                    # שליחת התראה מידית לטלגרם!
-                    send_telegram_notification(telegram_token, telegram_chat_id, lead_title, lead_link, lead_date)
+                    
+                    # שליחה לטלגרם רק אם זה ליד חדש וגם הציון מ-7 ומעלה!
+                    if ai_score >= 7:
+                        title_with_score = f"🔥 ליד חם! (ציון: {ai_score})\n{lead_title}"
+                        send_telegram_notification(telegram_token, telegram_chat_id, title_with_score, lead_link, lead_date)
 
         conn.commit()
         return pd.DataFrame(leads)
