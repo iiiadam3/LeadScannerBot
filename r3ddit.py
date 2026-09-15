@@ -22,13 +22,11 @@ CREATE TABLE IF NOT EXISTS leads (
     date TEXT,
     title TEXT,
     link TEXT UNIQUE,
-    score INTEGER
+    score INTEGER,
+    ai_score INTEGER
 )
 ''')
 conn.commit()
-
-import requests
-import os
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
@@ -141,23 +139,6 @@ def get_reddit_leads_bypass(subreddit_name, intent_keywords, context_keywords, n
                     
                     # 3. שליחה לטלגרם רק אם הליד חדש *וגם* ה-AI נתן ציון 7 ומעלה
                     if ai_score >= 7:
-                        # שימוש בפונקציה המקורית שלך עם תוספת של הציון לכותרת
-                        title_with_score = f"🔥 ליד חם! (ציון: {ai_score})\n{lead_title}"
-                        send_telegram_notification(telegram_token, telegram_chat_id, title_with_score, lead_link, lead_date)
-
-            conn.commit()
-        
-                # אם הליד חדש לחלוטין (ולא נשמר בעבר)
-                if cursor.rowcount > 0:
-                    leads.append({
-                        "Date": lead_date,
-                        "Title": lead_title,
-                        "Link": lead_link,
-                        "Score": lead_score
-                    })
-                    
-                    # שליחה לטלגרם רק אם זה ליד חדש וגם הציון מ-7 ומעלה!
-                    if ai_score >= 7:
                         title_with_score = f"🔥 ליד חם! (ציון: {ai_score})\n{lead_title}"
                         send_telegram_notification(telegram_token, telegram_chat_id, title_with_score, lead_link, lead_date)
 
@@ -172,7 +153,6 @@ def get_reddit_leads_bypass(subreddit_name, intent_keywords, context_keywords, n
 # --- הפעלת התוכנית המרכזית (Main) ---
 # ==========================================
 def main():
-    # הרחבנו את הסאברדיטים לקהילות יזמים, פרילנסרים ובקשות פיתוח
     target_subreddit = "shopify+wordpress+smallbusiness+forhire+startups+Entrepreneur+freelance+webdev+programmingrequests"
 
     intent_phrases = [
