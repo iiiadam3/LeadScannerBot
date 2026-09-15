@@ -123,19 +123,29 @@ def get_reddit_leads_bypass(subreddit_name, intent_keywords, context_keywords, n
                 lead_link = entry.get('link', '')
                 lead_score = 0
 
-                # ניסיון הכנסה למסד הנתונים בענן
+                # 1. הכנסה למסד הנתונים בשאילתה אחת שכוללת את הכל!
                 cursor.execute('''
-                INSERT INTO leads (date, title, link, score)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO leads (date, title, link, score, ai_score)
+                VALUES (%s, %s, %s, %s, %s)
                 ON CONFLICT (link) DO NOTHING
-                ''', (lead_date, lead_title, lead_link, lead_score))
+                ''', (lead_date, lead_title, lead_link, lead_score, ai_score))
 
-                # 1. שמירה למסד הנתונים בכל מקרה (כדי שלא נזרוק לפח מידע)
-                cursor.execute(
-                    "INSERT INTO leads (title, link, ai_score) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
-                    (entry.title, entry.link, ai_score)
-                )
-                conn.commit()
+                # 2. נבדוק אם הליד באמת חדש והוכנס הרגע למסד הנתונים
+                if cursor.rowcount > 0:
+                    leads.append({
+                        "Date": lead_date,
+                        "Title": lead_title,
+                        "Link": lead_link,
+                        "Score": lead_score
+                    })
+                    
+                    # 3. שליחה לטלגרם רק אם הליד חדש *וגם* ה-AI נתן ציון 7 ומעלה
+                    if ai_score >= 7:
+                        # שימוש בפונקציה המקורית שלך עם תוספת של הציון לכותרת
+                        title_with_score = f"🔥 ליד חם! (ציון: {ai_score})\n{lead_title}"
+                        send_telegram_notification(telegram_token, telegram_chat_id, title_with_score, lead_link, lead_date)
+
+            conn.commit()
         
                 # 2. שליחה לטלגרם רק אם ה-AI קבע שזה ליד חם!
                 if ai_score >= 7:
