@@ -105,7 +105,7 @@ def get_reddit_leads_bypass(subreddit_name, intent_keywords, context_keywords, n
             text = entry.get('summary', '').lower()
             content = title + " " + text
 
-            # סינון חכם
+            # סינון חכם לפני ה-AI כדי לחסוך קריאות API
             contains_intent = any(keyword in content for keyword in intent_keywords)
             contains_context = any(keyword in content for keyword in context_keywords)
             contains_negative = any(neg_keyword in content for neg_keyword in negative_keywords)
@@ -127,7 +127,7 @@ def get_reddit_leads_bypass(subreddit_name, intent_keywords, context_keywords, n
                 if cursor.rowcount > 0:
                     leads.append({"Title": lead_title, "Link": lead_link})
 
-                    # שליחה לטלגרם אם הציון גבוה מ-7
+                    # שליחה לטלגרם רק אם ציון ה-AI גבוה מספיק
                     if ai_score >= 7:
                         title_with_score = f"🔥 ליד חם! (ציון: {ai_score})\n{lead_title}"
                         send_telegram_notification(telegram_token, telegram_chat_id, title_with_score, lead_link,
@@ -146,7 +146,7 @@ def get_reddit_leads_bypass(subreddit_name, intent_keywords, context_keywords, n
 def main():
     target_subreddit = "shopify+wordpress+smallbusiness+forhire+startups+Entrepreneur+freelance+webdev+programmingrequests"
 
-    # 1. משיכת מילות המפתח באופן דינאמי ממסד הנתונים
+    # משיכת מילות המפתח באופן דינאמי ממסד הנתונים
     intent_phrases = []
     context_keywords = []
     negative_keywords = []
@@ -168,7 +168,7 @@ def main():
             f"Loaded keywords from DB: {len(intent_phrases)} intent, {len(context_keywords)} context, {len(negative_keywords)} negative.")
     except Exception as e:
         print(f"Failed to load keywords from DB: {e}")
-        return  # עוצר את הריצה כדי לא לסרוק רדיט עם רשימות ריקות
+        return
 
     print("Scraping Reddit via RSS...")
     leads_df = get_reddit_leads_bypass(target_subreddit, intent_phrases, context_keywords, negative_keywords)
