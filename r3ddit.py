@@ -1,137 +1,185 @@
+import os
 import requests
 import pandas as pd
 from datetime import datetime
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.base import MIMEBase
-from email import encoders
-import os
+import psycopg2
+import feedparser
 
 pd.set_option('display.max_colwidth', None)
 
+# ==========================================
+# --- הגדרת מסד הנתונים (PostgreSQL Cloud) ---
+# ==========================================
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
-# --- פונקציה 1: שאיבת הנתונים מרדיט וסינון ---
-def get_reddit_leads_bypass(subreddit_name, intent_keywords, context_keywords, negative_keywords, limit=100):
-    url = f"https://www.reddit.com/r/{subreddit_name}/new.json?limit={limit}"
+conn = psycopg2.connect(DATABASE_URL)
+cursor = conn.cursor()
 
-    # התיקון הקריטי: User-Agent חוקי לפי הכללים של רדיט כדי למנוע חסימה
-    headers = {'User-Agent': 'windows:AdamRedditLeadBot:v1.0 (by /u/Fearless_Ant674)'}
+# יצירת טבלת לידים (למקרה שלא קיימת)
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS leads (
+    id SERIAL PRIMARY KEY,
+    date TEXT,
+    title TEXT,
+    link TEXT UNIQUE,
+    score INTEGER,
+    ai_score INTEGER
+)
+''')
+conn.commit()
+
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+
+
+def get_ai_score(title, description):
+    if not OPENAI_API_KEY:
+        return 0
+
+    url = "https://api.openai.com/v1/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {OPENAI_API_KEY}"
+    }
+
+    prompt = f"You are a lead scoring bot for a freelancer. Rate the intent of this Reddit post to hire or pay for a digital service (like web dev or design) from 1 to 10. Return ONLY the number. Title: {title}. Content: {description}"
+
+    data = {
+        "model": "gpt-4o-mini",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.2
+    }
 
     try:
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        data = response.json()
+        response = requests.post(url, headers=headers, json=data)
+        score = int(response.json()['choices'][0]['message']['content'].strip())
+        return score
+    except Exception as e:
+        print("AI Error:", e)
+        return 1
 
+
+# ==========================================
+# --- פונקציה: שליחת התראה ל-Telegram ---
+# ==========================================
+def send_telegram_notification(bot_token, chat_id, title, link, date_str):
+    if not bot_token or not chat_id:
+        print("Telegram token or chat ID is missing. Skipping Telegram notification.")
+        return
+
+    message = (
+        f"🎯 *ליד חדש נמצא ברדיט!*\n\n"
+        f"📌 *כותרת:* {title}\n"
+        f"📅 *תאריך:* {date_str}\n\n"
+        f"🔗 [לחץ כאן לפתיחת הפוסט ברדיט]({link})"
+    )
+
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": message,
+        "parse_mode": "Markdown",
+        "disable_web_page_preview": False
+    }
+
+    try:
+        requests.post(url, json=payload)
+    except Exception as e:
+        print(f"Error sending Telegram notification: {e}")
+
+
+# ==========================================
+# --- פונקציה 1: שאיבת הנתונים מרדיט (RSS) ---
+# ==========================================
+def get_reddit_leads_bypass(subreddit_name, intent_keywords, context_keywords, negative_keywords):
+    url = f"https://www.reddit.com/r/{subreddit_name}/new.rss"
+    agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36'
+
+    telegram_token = os.environ.get("TELEGRAM_TOKEN")
+    telegram_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+
+    try:
+        feed = feedparser.parse(url, agent=agent)
         leads = []
-        for post in data['data']['children']:
-            post_data = post['data']
-            title = post_data.get('title', '').lower()
-            text = post_data.get('selftext', '').lower()
+        for entry in feed.entries:
+            title = entry.get('title', '').lower()
+            text = entry.get('summary', '').lower()
             content = title + " " + text
 
-            # סינון חכם 2D
+            # סינון חכם
             contains_intent = any(keyword in content for keyword in intent_keywords)
             contains_context = any(keyword in content for keyword in context_keywords)
             contains_negative = any(neg_keyword in content for neg_keyword in negative_keywords)
 
             if contains_intent and contains_context and not contains_negative:
-                leads.append({
-                    "Date": datetime.fromtimestamp(post_data.get('created_utc', 0)).strftime('%Y-%m-%d %H:%M'),
-                    "Title": post_data.get('title', ''),
-                    "Link": f"https://www.reddit.com{post_data.get('permalink', '')}",
-                    "Score": post_data.get('score', 0)
-                })
+                ai_score = get_ai_score(entry.title, entry.description)
+                lead_date = entry.get('published', 'No Date')
+                lead_title = entry.get('title', '')
+                lead_link = entry.get('link', '')
 
+                # הכנסה למסד הנתונים
+                cursor.execute('''
+                INSERT INTO leads (date, title, link, score, ai_score)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (link) DO NOTHING
+                ''', (lead_date, lead_title, lead_link, 0, ai_score))
+
+                # בדיקה אם הליד חדש
+                if cursor.rowcount > 0:
+                    leads.append({"Title": lead_title, "Link": lead_link})
+
+                    # שליחה לטלגרם אם הציון גבוה מ-7
+                    if ai_score >= 7:
+                        title_with_score = f"🔥 ליד חם! (ציון: {ai_score})\n{lead_title}"
+                        send_telegram_notification(telegram_token, telegram_chat_id, title_with_score, lead_link,
+                                                   lead_date)
+
+        conn.commit()
         return pd.DataFrame(leads)
-
     except Exception as e:
         print(f"Error fetching data: {e}")
         return pd.DataFrame()
-
-
-# --- פונקציה 2: שליחת האימייל ---
-def send_leads_email(csv_file_path, sender_email, app_password, receiver_email):
-    msg = MIMEMultipart()
-    msg['From'] = sender_email
-    msg['To'] = receiver_email
-    msg['Subject'] = "הלידים היומיים שלך מרדיט מוכנים! 🚀"
-
-    body = "היי! הסקריפט סיים לרוץ. מצורף קובץ הלידים המעודכן להיום."
-    msg.attach(MIMEText(body, 'plain', 'utf-8'))
-
-    try:
-        with open(csv_file_path, "rb") as attachment:
-            part = MIMEBase("application", "octet-stream")
-            part.set_payload(attachment.read())
-
-        encoders.encode_base64(part)
-        part.add_header("Content-Disposition", f"attachment; filename={os.path.basename(csv_file_path)}")
-        msg.attach(part)
-    except Exception as e:
-        print(f"Error attaching file: {e}")
-        return
-
-    try:
-        print("Connecting to Gmail server...")
-        server = smtplib.SMTP('smtp.gmail.com', 587)
-        server.starttls()
-        server.login(sender_email, app_password)
-        server.sendmail(sender_email, receiver_email, msg.as_string())
-        server.quit()
-        print(f"✅ Success! Email sent to {receiver_email}")
-    except Exception as e:
-        print(f"❌ Failed to send email: {e}")
 
 
 # ==========================================
 # --- הפעלת התוכנית המרכזית (Main) ---
 # ==========================================
 def main():
-    target_subreddit = "shopify+wordpress+smallbusiness+forhire"
+    target_subreddit = "shopify+wordpress+smallbusiness+forhire+startups+Entrepreneur+freelance+webdev+programmingrequests"
 
-    # עברנו לביטויים שמראים כוונה אמיתית לשכור או לבקש עזרה מקצועית (Intent)
-    intent_phrases = [
-        "looking for a developer", "hire a", "hiring", "need a website",
-        "need help with my website", "need someone to", "budget is",
-        "paid task", "paid gig", "willing to pay", "can't code"
-    ]
+    # 1. משיכת מילות המפתח באופן דינאמי ממסד הנתונים
+    intent_phrases = []
+    context_keywords = []
+    negative_keywords = []
 
-    # מילים שחייבות להופיע כדי להוכיח שמדובר בטכנולוגיה (Context)
-    context_keywords = [
-        "shopify", "wordpress", "website", "developer", "plugin",
-        "ecommerce", "e-commerce", "coding", "html", "css"
-    ]
+    try:
+        cursor.execute("SELECT word, category FROM keywords;")
+        rows = cursor.fetchall()
+        for row in rows:
+            word = row[0]
+            category = row[1]
+            if category == 'intent':
+                intent_phrases.append(word)
+            elif category == 'context':
+                context_keywords.append(word)
+            elif category == 'negative':
+                negative_keywords.append(word)
 
-    # הרחבנו את מילות השלילה שמסננות רעש (Negative)
-    negative_keywords = [
-        "hire me", "my portfolio", "starting a", "video editor",
-        "for hire", "how to learn", "student", "auto", "insurance",
-        "loan", "tax", "news", "article", "ransomware", "second hand"
-    ]
+        print(
+            f"Loaded keywords from DB: {len(intent_phrases)} intent, {len(context_keywords)} context, {len(negative_keywords)} negative.")
+    except Exception as e:
+        print(f"Failed to load keywords from DB: {e}")
+        return  # עוצר את הריצה כדי לא לסרוק רדיט עם רשימות ריקות
 
-    print("Scraping Reddit with Upgraded NLP-Style Filtering...")
-    # כאן אנחנו מעבירים את ה-intent_phrases במקום מילים בודדות
-    leads_df = get_reddit_leads_bypass(target_subreddit, intent_phrases, context_keywords, negative_keywords, limit=100)
+    print("Scraping Reddit via RSS...")
+    leads_df = get_reddit_leads_bypass(target_subreddit, intent_phrases, context_keywords, negative_keywords)
 
     if not leads_df.empty:
-        print(f"Found {len(leads_df)} highly relevant leads!")
-
-        filename = "filtered_reddit_leads.csv"
-        leads_df.to_csv(filename, index=False, encoding='utf-8')
-        print("Saved leads to file.")
-
-        # --- פרטי המייל ---
-        SENDER_EMAIL = "iadam314@gmail.com"
-
-        # זה השם של ה"מגירה" שהגדרנו בקובץ ה-bat
-        APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD")
-        RECEIVER_EMAIL = "iadam314@gmail.com"
-
-
-        send_leads_email(filename, SENDER_EMAIL, APP_PASSWORD, RECEIVER_EMAIL)
+        print(f"Found {len(leads_df)} NEW highly relevant leads!")
     else:
-        print("No relevant leads found after filtering.")
+        print("No new relevant leads found at this time.")
+
+    if conn:
+        conn.close()
 
 
 if __name__ == "__main__":
