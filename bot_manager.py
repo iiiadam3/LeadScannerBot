@@ -130,20 +130,22 @@ def process_new_keyword(message, category):
         return
 
     word = message.text.lower().strip()
+    user_chat_id = str(message.chat.id)  # חילוץ מזהה המשתמש
 
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
 
+        # הכנסת המילה יחד עם מזהה המשתמש לטבלה
         cursor.execute(
-            "INSERT INTO keywords (word, category) VALUES (%s, %s) ON CONFLICT (word) DO NOTHING;",
-            (word, category)
+            "INSERT INTO keywords (word, category, chat_id) VALUES (%s, %s, %s) ON CONFLICT (word, chat_id) DO NOTHING;",
+            (word, category, user_chat_id)
         )
 
         if cursor.rowcount > 0:
             bot.send_message(message.chat.id, f"✅ המילה '{word}' התווספה בהצלחה לקטגוריה {category}!")
         else:
-            bot.send_message(message.chat.id, f"⚠️ המילה '{word}' כבר קיימת במערכת.")
+            bot.send_message(message.chat.id, f"⚠️ המילה '{word}' כבר קיימת אצלך במערכת.")
 
         conn.commit()
         conn.close()
