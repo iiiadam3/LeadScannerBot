@@ -1,36 +1,45 @@
 import os
 import requests
 import pandas as pd
-from datetime import datetime
 import psycopg2
 import feedparser
 
 pd.set_option('display.max_colwidth', None)
 
-# ==========================================
-# --- הגדרת מסד הנתונים (PostgreSQL Cloud) ---
-# ==========================================
 DATABASE_URL = os.environ.get("DATABASE_URL")
-
 conn = psycopg2.connect(DATABASE_URL)
 cursor = conn.cursor()
 
-# יצירת טבלת לידים (למקרה שלא קיימת)
-cursor.execute('''
-CREATE TABLE IF NOT EXISTS leads (
-    id SERIAL PRIMARY KEY,
-    date TEXT,
-    title TEXT,
-    link TEXT UNIQUE,
-    score INTEGER,
-    ai_score INTEGER
-)
-''')
-conn.commit()
+# ==========================================
+# --- עדכון סכמה אוטומטי לטובת מרובה-משתמשים ---
+# ==========================================
+try:
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS leads (
+        id SERIAL PRIMARY KEY,
+        date TEXT,
+        title TEXT,
+        link TEXT,
+        score INTEGER,
+        ai_score INTEGER
+    );
+    ''')
+    # הוספת עמודת המשתמש ועדכון חוקי הכפילויות (פוסט ייחודי לכל משתמש)
+    cursor.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS chat_id TEXT;")
+    cursor.execute("ALTER TABLE leads DROP CONSTRAINT IF EXISTS leads_link_key CASCADE;")
+    cursor.execute("ALTER TABLE leads DROP CONSTRAINT IF EXISTS leads_link_chat_id_key CASCADE;")
+    cursor.execute("ALTER TABLE leads ADD CONSTRAINT leads_link_chat_id_key UNIQUE (link, chat_id);")
+    conn.commit()
+except Exception as e:
+    print(f"Schema update notice: {e}")
+    conn.rollback()
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
 
+# ==========================================
+# --- פונקציות עזר: AI וטלגרם ---
+# ==========================================
 def get_ai_score(title, description):
     if not OPENAI_API_KEY:
         return 0
@@ -58,19 +67,15 @@ def get_ai_score(title, description):
         return 1
 
 
-# ==========================================
-# --- פונקציה: שליחת התראה ל-Telegram ---
-# ==========================================
 def send_telegram_notification(bot_token, chat_id, title, link, date_str):
     if not bot_token or not chat_id:
-        print("Telegram token or chat ID is missing. Skipping Telegram notification.")
         return
 
     message = (
-        f"🎯 *ליד חדש נמצא ברדיט!*\n\n"
+        f"🎯 *ליד חדש נמצא עבורך!*\n\n"
         f"📌 *כותרת:* {title}\n"
         f"📅 *תאריך:* {date_str}\n\n"
-        f"🔗 [לחץ כאן לפתיחת הפוסט ברדיט]({link})"
+        f"🔗 [לחץ כאן לפתיחת הפוסט]({link})"
     )
 
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
@@ -80,64 +85,10 @@ def send_telegram_notification(bot_token, chat_id, title, link, date_str):
         "parse_mode": "Markdown",
         "disable_web_page_preview": False
     }
-
     try:
         requests.post(url, json=payload)
     except Exception as e:
-        print(f"Error sending Telegram notification: {e}")
-
-
-# ==========================================
-# --- פונקציה 1: שאיבת הנתונים מרדיט (RSS) ---
-# ==========================================
-def get_reddit_leads_bypass(subreddit_name, intent_keywords, context_keywords, negative_keywords):
-    url = f"https://www.reddit.com/r/{subreddit_name}/new.rss"
-    agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36'
-
-    telegram_token = os.environ.get("TELEGRAM_TOKEN")
-    telegram_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-
-    try:
-        feed = feedparser.parse(url, agent=agent)
-        leads = []
-        for entry in feed.entries:
-            title = entry.get('title', '').lower()
-            text = entry.get('summary', '').lower()
-            content = title + " " + text
-
-            # סינון חכם לפני ה-AI כדי לחסוך קריאות API
-            contains_intent = any(keyword in content for keyword in intent_keywords)
-            contains_context = any(keyword in content for keyword in context_keywords)
-            contains_negative = any(neg_keyword in content for neg_keyword in negative_keywords)
-
-            if contains_intent and contains_context and not contains_negative:
-                ai_score = get_ai_score(entry.title, entry.description)
-                lead_date = entry.get('published', 'No Date')
-                lead_title = entry.get('title', '')
-                lead_link = entry.get('link', '')
-
-                # הכנסה למסד הנתונים
-                cursor.execute('''
-                INSERT INTO leads (date, title, link, score, ai_score)
-                VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT (link) DO NOTHING
-                ''', (lead_date, lead_title, lead_link, 0, ai_score))
-
-                # בדיקה אם הליד חדש
-                if cursor.rowcount > 0:
-                    leads.append({"Title": lead_title, "Link": lead_link})
-
-                    # שליחה לטלגרם רק אם ציון ה-AI גבוה מספיק
-                    if ai_score >= 7:
-                        title_with_score = f"🔥 ליד חם! (ציון: {ai_score})\n{lead_title}"
-                        send_telegram_notification(telegram_token, telegram_chat_id, title_with_score, lead_link,
-                                                   lead_date)
-
-        conn.commit()
-        return pd.DataFrame(leads)
-    except Exception as e:
-        print(f"Error fetching data: {e}")
-        return pd.DataFrame()
+        print(f"Telegram error: {e}")
 
 
 # ==========================================
@@ -145,41 +96,87 @@ def get_reddit_leads_bypass(subreddit_name, intent_keywords, context_keywords, n
 # ==========================================
 def main():
     target_subreddit = "shopify+wordpress+smallbusiness+forhire+startups+Entrepreneur+freelance+webdev+programmingrequests"
+    telegram_token = os.environ.get("TELEGRAM_TOKEN")
 
-    # משיכת מילות המפתח באופן דינאמי ממסד הנתונים
-    intent_phrases = []
-    context_keywords = []
-    negative_keywords = []
+    # 1. משיכת כל מילות המפתח וסידורן לפי משתמשים (chat_id)
+    cursor.execute("SELECT word, category, chat_id FROM keywords WHERE chat_id IS NOT NULL;")
+    rows = cursor.fetchall()
 
-    try:
-        cursor.execute("SELECT word, category FROM keywords;")
-        rows = cursor.fetchall()
-        for row in rows:
-            word = row[0]
-            category = row[1]
-            if category == 'intent':
-                intent_phrases.append(word)
-            elif category == 'context':
-                context_keywords.append(word)
-            elif category == 'negative':
-                negative_keywords.append(word)
+    user_profiles = {}
+    for word, category, chat_id in rows:
+        if chat_id not in user_profiles:
+            user_profiles[chat_id] = {'intent': [], 'context': [], 'negative': []}
+        if category in user_profiles[chat_id]:
+            user_profiles[chat_id][category].append(word)
 
-        print(
-            f"Loaded keywords from DB: {len(intent_phrases)} intent, {len(context_keywords)} context, {len(negative_keywords)} negative.")
-    except Exception as e:
-        print(f"Failed to load keywords from DB: {e}")
+    if not user_profiles:
+        print("No active users with keywords found.")
         return
 
-    print("Scraping Reddit via RSS...")
-    leads_df = get_reddit_leads_bypass(target_subreddit, intent_phrases, context_keywords, negative_keywords)
+    print(f"Found {len(user_profiles)} active users. Fetching Reddit RSS...")
 
-    if not leads_df.empty:
-        print(f"Found {len(leads_df)} NEW highly relevant leads!")
-    else:
-        print("No new relevant leads found at this time.")
+    # 2. משיכת הפיד מרדיט פעם אחת בלבד
+    url = f"https://www.reddit.com/r/{target_subreddit}/new.rss"
+    agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36'
 
-    if conn:
-        conn.close()
+    try:
+        feed = feedparser.parse(url, agent=agent)
+    except Exception as e:
+        print(f"Failed to fetch Reddit: {e}")
+        return
+
+    for entry in feed.entries:
+        title = entry.get('title', '').lower()
+        text = entry.get('summary', '').lower()
+        content = title + " " + text
+
+        lead_title = entry.get('title', '')
+        lead_link = entry.get('link', '')
+        lead_date = entry.get('published', 'No Date')
+
+        ai_score = None  # הציון נשאר ריק ויתמלא רק אם יהיה צורך
+
+        # 3. סריקת הפוסט מול ההגדרות של כל משתמש בנפרד
+        for chat_id, keywords in user_profiles.items():
+            intent_phrases = keywords['intent']
+            context_keywords = keywords['context']
+            negative_keywords = keywords['negative']
+
+            # דילוג על משתמשים שעדיין לא הגדירו מילים בסיסיות
+            if not intent_phrases or not context_keywords:
+                continue
+
+            contains_intent = any(k in content for k in intent_phrases)
+            contains_context = any(k in content for k in context_keywords)
+            contains_negative = any(k in content for k in negative_keywords)
+
+            # אם יש התאמה ללקוח הספציפי
+            if contains_intent and contains_context and not contains_negative:
+
+                # חישוב AI מתבצע לכל היותר פעם אחת לפוסט, גם אם התאים למספר משתמשים
+                if ai_score is None:
+                    ai_score = get_ai_score(entry.title, entry.description)
+
+                try:
+                    # שמירת הליד במסד הנתונים תחת המשתמש הספציפי
+                    cursor.execute('''
+                    INSERT INTO leads (date, title, link, score, ai_score, chat_id)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (link, chat_id) DO NOTHING
+                    ''', (lead_date, lead_title, lead_link, 0, ai_score, chat_id))
+
+                    # שליחת התראה ללקוח אם הליד חדש והציון גבוה מ-7
+                    if cursor.rowcount > 0 and ai_score >= 7:
+                        title_with_score = f"🔥 ליד חם! (ציון: {ai_score})\n{lead_title}"
+                        send_telegram_notification(telegram_token, chat_id, title_with_score, lead_link, lead_date)
+
+                except Exception as e:
+                    print(f"DB Error for user {chat_id}: {e}")
+                    conn.rollback()
+
+    conn.commit()
+    conn.close()
+    print("Scrape completed successfully.")
 
 
 if __name__ == "__main__":
