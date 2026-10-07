@@ -76,24 +76,30 @@ def handle_query(call):
 # ==========================================
 # --- פעולה: הצגת סטטיסטיקות ---
 # ==========================================
+# ==========================================
+# --- פעולה: הצגת סטטיסטיקות (מותאם משתמש) ---
+# ==========================================
 def show_stats(message):
-    msg = bot.send_message(message.chat.id, "⏳ שולף נתונים ממסד הנתונים...")
+    msg = bot.send_message(message.chat.id, "⏳ שולף נתונים אישיים ממסד הנתונים...")
+    user_chat_id = str(message.chat.id)
 
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        cursor.execute("SELECT COUNT(*) FROM leads;")
+        # ספירת כל הלידים המשויכים ללקוח הספציפי
+        cursor.execute("SELECT COUNT(*) FROM leads WHERE chat_id = %s;", (user_chat_id,))
         total_leads = cursor.fetchone()[0]
 
-        cursor.execute("SELECT COUNT(*) FROM leads WHERE ai_score >= 7;")
+        # ספירת הלידים החמים המשויכים ללקוח הספציפי
+        cursor.execute("SELECT COUNT(*) FROM leads WHERE ai_score >= 7 AND chat_id = %s;", (user_chat_id,))
         hot_leads = cursor.fetchone()[0]
 
         conn.close()
 
         stats_text = (
-            f"📊 *סטטיסטיקות לידים:*\n\n"
-            f"סך הכל לידים שנאספו: {total_leads}\n"
+            f"📊 *הסטטיסטיקות שלך:*\n\n"
+            f"סך הכל לידים שנאספו עבורך: {total_leads}\n"
             f"🔥 לידים רותחים (ציון 7+): {hot_leads}"
         )
         bot.edit_message_text(stats_text, chat_id=message.chat.id, message_id=msg.message_id, parse_mode="Markdown")
