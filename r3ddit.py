@@ -11,7 +11,7 @@ conn = psycopg2.connect(DATABASE_URL)
 cursor = conn.cursor()
 
 # ==========================================
-# --- עדכון סכמה אוטומטי לטובת מרובה-משתמשים ---
+# --- עדכון סכמה אוטומטי ---
 # ==========================================
 try:
     cursor.execute('''
@@ -21,11 +21,10 @@ try:
         title TEXT,
         link TEXT,
         score INTEGER,
-        ai_score INTEGER
+        ai_score INTEGER,
+        chat_id TEXT
     );
     ''')
-    # הוספת עמודת המשתמש ועדכון חוקי הכפילויות (פוסט ייחודי לכל משתמש)
-    cursor.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS chat_id TEXT;")
     cursor.execute("ALTER TABLE leads DROP CONSTRAINT IF EXISTS leads_link_key CASCADE;")
     cursor.execute("ALTER TABLE leads DROP CONSTRAINT IF EXISTS leads_link_chat_id_key CASCADE;")
     cursor.execute("ALTER TABLE leads ADD CONSTRAINT leads_link_chat_id_key UNIQUE (link, chat_id);")
@@ -50,7 +49,7 @@ def get_ai_score(title, description):
         "Authorization": f"Bearer {OPENAI_API_KEY}"
     }
 
-    prompt = f"You are a lead scoring bot for a freelancer. Rate the intent of this Reddit post to hire or pay for a digital service (like web dev or design) from 1 to 10. Return ONLY the number. Title: {title}. Content: {description}"
+    prompt = f"You are a lead scoring bot for a freelancer. Rate the intent of this post to hire or pay for a digital service from 1 to 10. Return ONLY the number. Title: {title}. Content: {description}"
 
     data = {
         "model": "gpt-4o-mini",
@@ -67,12 +66,13 @@ def get_ai_score(title, description):
         return 1
 
 
-def send_telegram_notification(bot_token, chat_id, title, link, date_str):
+def send_telegram_notification(bot_token, chat_id, title, link, date_str, source):
     if not bot_token or not chat_id:
         return
 
+    # הוספנו את המקור (Source) להודעה כדי שתדע מאיפה הליד!
     message = (
-        f"🎯 *ליד חדש נמצא עבורך!*\n\n"
+        f"🎯 *ליד חדש מ-{source}!*\n\n"
         f"📌 *כותרת:* {title}\n"
         f"📅 *תאריך:* {date_str}\n\n"
         f"🔗 [לחץ כאן לפתיחת הפוסט]({link})"
@@ -95,7 +95,6 @@ def send_telegram_notification(bot_token, chat_id, title, link, date_str):
 # --- הפעלת התוכנית המרכזית (Main) ---
 # ==========================================
 def main():
-    target_subreddit = "shopify+wordpress+smallbusiness+forhire+startups+Entrepreneur+freelance+webdev+programmingrequests"
     telegram_token = os.environ.get("TELEGRAM_TOKEN")
 
     # 1. משיכת כל מילות המפתח וסידורן לפי משתמשים (chat_id)
@@ -113,70 +112,78 @@ def main():
         print("No active users with keywords found.")
         return
 
-    print(f"Found {len(user_profiles)} active users. Fetching Reddit RSS...")
+    print(f"Found {len(user_profiles)} active users. Starting aggregation...")
 
-    # 2. משיכת הפיד מרדיט פעם אחת בלבד
-    url = f"https://www.reddit.com/r/{target_subreddit}/new.rss"
+    # 2. הגדרת רשימת המקורות (Data Aggregation)
+    target_subreddit = "shopify+wordpress+smallbusiness+forhire+startups+Entrepreneur+freelance+webdev+programmingrequests"
+
+    # Upwork מאפשר למשוך RSS לפי מילת חיפוש. שמתי "developer" כחיפוש רחב, והמסננת שלך כבר תעשה את השאר.
+    rss_feeds = [
+        {"source": "Reddit", "url": f"https://www.reddit.com/r/{target_subreddit}/new.rss"},
+        {"source": "Upwork", "url": "https://www.upwork.com/ab/feed/jobs/rss?sort=recency&q=developer"}
+    ]
+
     agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36'
 
-    try:
-        feed = feedparser.parse(url, agent=agent)
-    except Exception as e:
-        print(f"Failed to fetch Reddit: {e}")
-        return
+    # 3. מעבר על כל מקור וסריקה שלו
+    for feed_info in rss_feeds:
+        source_name = feed_info["source"]
+        feed_url = feed_info["url"]
+        print(f"Fetching from {source_name}...")
 
-    for entry in feed.entries:
-        title = entry.get('title', '').lower()
-        text = entry.get('summary', '').lower()
-        content = title + " " + text
+        try:
+            feed = feedparser.parse(feed_url, agent=agent)
+        except Exception as e:
+            print(f"Failed to fetch {source_name}: {e}")
+            continue
 
-        lead_title = entry.get('title', '')
-        lead_link = entry.get('link', '')
-        lead_date = entry.get('published', 'No Date')
+        for entry in feed.entries:
+            title = entry.get('title', '').lower()
+            text = entry.get('summary', '').lower()
+            content = title + " " + text
 
-        ai_score = None  # הציון נשאר ריק ויתמלא רק אם יהיה צורך
+            lead_title = entry.get('title', '')
+            lead_link = entry.get('link', '')
+            lead_date = entry.get('published', 'No Date')
 
-        # 3. סריקת הפוסט מול ההגדרות של כל משתמש בנפרד
-        for chat_id, keywords in user_profiles.items():
-            intent_phrases = keywords['intent']
-            context_keywords = keywords['context']
-            negative_keywords = keywords['negative']
+            ai_score = None
 
-            # דילוג על משתמשים שעדיין לא הגדירו מילים בסיסיות
-            if not intent_phrases or not context_keywords:
-                continue
+            for chat_id, keywords in user_profiles.items():
+                intent_phrases = keywords['intent']
+                context_keywords = keywords['context']
+                negative_keywords = keywords['negative']
 
-            contains_intent = any(k in content for k in intent_phrases)
-            contains_context = any(k in content for k in context_keywords)
-            contains_negative = any(k in content for k in negative_keywords)
+                if not intent_phrases or not context_keywords:
+                    continue
 
-            # אם יש התאמה ללקוח הספציפי
-            if contains_intent and contains_context and not contains_negative:
+                contains_intent = any(k in content for k in intent_phrases)
+                contains_context = any(k in content for k in context_keywords)
+                contains_negative = any(k in content for k in negative_keywords)
 
-                # חישוב AI מתבצע לכל היותר פעם אחת לפוסט, גם אם התאים למספר משתמשים
-                if ai_score is None:
-                    ai_score = get_ai_score(entry.title, entry.description)
+                if contains_intent and contains_context and not contains_negative:
+                    if ai_score is None:
+                        ai_score = get_ai_score(entry.get('title', ''), entry.get('summary', ''))
 
-                try:
-                    # שמירת הליד במסד הנתונים תחת המשתמש הספציפי
-                    cursor.execute('''
-                    INSERT INTO leads (date, title, link, score, ai_score, chat_id)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (link, chat_id) DO NOTHING
-                    ''', (lead_date, lead_title, lead_link, 0, ai_score, chat_id))
+                    try:
+                        cursor.execute('''
+                        INSERT INTO leads (date, title, link, score, ai_score, chat_id)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (link, chat_id) DO NOTHING
+                        ''', (lead_date, lead_title, lead_link, 0, ai_score, chat_id))
 
-                    # שליחת התראה ללקוח אם הליד חדש והציון גבוה מ-7
-                    if cursor.rowcount > 0 and ai_score >= 7:
-                        title_with_score = f"🔥 ליד חם! (ציון: {ai_score})\n{lead_title}"
-                        send_telegram_notification(telegram_token, chat_id, title_with_score, lead_link, lead_date)
+                        if cursor.rowcount > 0 and ai_score >= 7:
+                            title_with_score = f"🔥 ציון: {ai_score} | {lead_title}"
+                            # העברנו את משתנה המקור לפונקציית ההתראה
+                            send_telegram_notification(telegram_token, chat_id, title_with_score, lead_link, lead_date,
+                                                       source_name)
 
-                except Exception as e:
-                    print(f"DB Error for user {chat_id}: {e}")
-                    conn.rollback()
+                    except Exception as e:
+                        print(f"DB Error for user {chat_id}: {e}")
+                        conn.rollback()
 
     conn.commit()
     conn.close()
-    print("Scrape completed successfully.")
+    print("Multi-source scrape completed successfully.")
 
 
 if __name__ == "__main__":
