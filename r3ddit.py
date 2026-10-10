@@ -1,8 +1,8 @@
 import os
 import requests
-import pandas as pd
-import psycopg2
 import feedparser
+import psycopg2
+import pandas as pd
 
 pd.set_option('display.max_colwidth', None)
 
@@ -34,6 +34,12 @@ except Exception as e:
     conn.rollback()
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+
+# ==========================================
+# --- רשימות סינון גלובליות (מנוע ה-Backend) ---
+# ==========================================
+GLOBAL_INTENT = ["hiring", "looking for", "budget", "paid", "need a", "hire", "wanted", "seeking"]
+GLOBAL_NEGATIVE = ["for free", "how to", "tutorial", "student", "course", "unpaid", "advice on", "help me learn"]
 
 
 # ==========================================
@@ -70,7 +76,6 @@ def send_telegram_notification(bot_token, chat_id, title, link, date_str, source
     if not bot_token or not chat_id:
         return
 
-    # הוספנו את המקור (Source) להודעה כדי שתדע מאיפה הליד!
     message = (
         f"🎯 *ליד חדש מ-{source}!*\n\n"
         f"📌 *כותרת:* {title}\n"
@@ -97,27 +102,24 @@ def send_telegram_notification(bot_token, chat_id, title, link, date_str, source
 def main():
     telegram_token = os.environ.get("TELEGRAM_TOKEN")
 
-    # 1. משיכת כל מילות המפתח וסידורן לפי משתמשים (chat_id)
-    cursor.execute("SELECT word, category, chat_id FROM keywords WHERE chat_id IS NOT NULL;")
+    # משיכת תחומי ההתמחות בלבד מהמשתמשים (קטגוריית context)
+    cursor.execute("SELECT word, chat_id FROM keywords WHERE category = 'context' AND chat_id IS NOT NULL;")
     rows = cursor.fetchall()
 
     user_profiles = {}
-    for word, category, chat_id in rows:
+    for word, chat_id in rows:
         if chat_id not in user_profiles:
-            user_profiles[chat_id] = {'intent': [], 'context': [], 'negative': []}
-        if category in user_profiles[chat_id]:
-            user_profiles[chat_id][category].append(word)
+            user_profiles[chat_id] = []
+        user_profiles[chat_id].append(word)
 
     if not user_profiles:
-        print("No active users with keywords found.")
+        print("No active users with contexts found.")
         return
 
     print(f"Found {len(user_profiles)} active users. Starting aggregation...")
 
-    # 2. הגדרת רשימת המקורות (Data Aggregation)
     target_subreddit = "shopify+wordpress+smallbusiness+forhire+startups+Entrepreneur+freelance+webdev+programmingrequests"
 
-    # Upwork מאפשר למשוך RSS לפי מילת חיפוש. שמתי "developer" כחיפוש רחב, והמסננת שלך כבר תעשה את השאר.
     rss_feeds = [
         {"source": "Reddit", "url": f"https://www.reddit.com/r/{target_subreddit}/new.rss"},
         {"source": "Upwork", "url": "https://www.upwork.com/ab/feed/jobs/rss?sort=recency&q=developer"}
@@ -125,7 +127,6 @@ def main():
 
     agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36'
 
-    # 3. מעבר על כל מקור וסריקה שלו
     for feed_info in rss_feeds:
         source_name = feed_info["source"]
         feed_url = feed_info["url"]
@@ -148,17 +149,14 @@ def main():
 
             ai_score = None
 
-            for chat_id, keywords in user_profiles.items():
-                intent_phrases = keywords['intent']
-                context_keywords = keywords['context']
-                negative_keywords = keywords['negative']
-
-                if not intent_phrases or not context_keywords:
+            for chat_id, context_keywords in user_profiles.items():
+                if not context_keywords:
                     continue
 
-                contains_intent = any(k in content for k in intent_phrases)
+                # שימוש ברשימות הגלובליות מול ההקשר הספציפי של המשתמש
+                contains_intent = any(k in content for k in GLOBAL_INTENT)
                 contains_context = any(k in content for k in context_keywords)
-                contains_negative = any(k in content for k in negative_keywords)
+                contains_negative = any(k in content for k in GLOBAL_NEGATIVE)
 
                 if contains_intent and contains_context and not contains_negative:
                     if ai_score is None:
@@ -173,7 +171,6 @@ def main():
 
                         if cursor.rowcount > 0 and ai_score >= 7:
                             title_with_score = f"🔥 ציון: {ai_score} | {lead_title}"
-                            # העברנו את משתנה המקור לפונקציית ההתראה
                             send_telegram_notification(telegram_token, chat_id, title_with_score, lead_link, lead_date,
                                                        source_name)
 
