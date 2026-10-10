@@ -1,3 +1,17 @@
+import os
+import telebot
+from telebot import types
+import psycopg2
+
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
+# כאן בעצם הבוט מוגדר - את זה כנראה מחקת בטעות
+bot = telebot.TeleBot(TELEGRAM_TOKEN)
+
+def get_db_connection():
+    return psycopg2.connect(DATABASE_URL)
+
 # ==========================================
 # --- תפריט ראשי והודעת פתיחה ---
 # ==========================================
