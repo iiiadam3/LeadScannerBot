@@ -128,9 +128,7 @@ def process_new_keyword(message, category):
         )
 
         if cursor.rowcount > 0:
-            bot.send_message(message.chat.id,
-                             f"✅ מעולה! התחום '*{word}*' נוסף בהצלחה למערכת.\nאנחנו נתחיל לסרוק לקוחות שמחפשים את השירות הזה.",
-                             parse_mode="Markdown")
+            bot.send_message(message.chat.id, f"✅ מעולה! התחום '*{word}*' נוסף בהצלחה למערכת.\nאנחנו נתחיל לסרוק לקוחות שמחפשים את השירות הזה, ונשלח לך לכאן רק לידים רותחים! 🔥", parse_mode="Markdown")
         else:
             bot.send_message(message.chat.id, f"⚠️ התחום '*{word}*' כבר מוגדר אצלך במערכת.", parse_mode="Markdown")
 
