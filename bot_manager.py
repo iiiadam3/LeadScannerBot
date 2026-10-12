@@ -4,6 +4,9 @@ from telebot import types
 import psycopg2
 from flask import Flask
 import threading
+from dotenv import load_dotenv
+
+load_dotenv()
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -42,9 +45,10 @@ def send_menu(message):
 
     markup = types.InlineKeyboardMarkup(row_width=1)
     btn_add_service = types.InlineKeyboardButton("➕ הוספת תחום התמחות", callback_data="add_service")
+    btn_manage = types.InlineKeyboardButton("⚙️ ניהול תחומי התמחות", callback_data="manage_services")
     btn_stats = types.InlineKeyboardButton("📊 הסטטיסטיקות שלי", callback_data="menu_stats")
 
-    markup.add(btn_add_service, btn_stats)
+    markup.add(btn_add_service, btn_manage, btn_stats)
 
     bot.send_message(
         message.chat.id,
@@ -66,6 +70,12 @@ def handle_query(call):
 
     elif call.data == "add_service":
         ask_for_service(call.message)
+
+    elif call.data == "manage_services":
+        show_services_for_management(call.message)
+
+    elif call.data.startswith("del_srv_"):
+        delete_service(call)
 
 
 # ==========================================
@@ -128,7 +138,11 @@ def process_new_keyword(message, category):
         )
 
         if cursor.rowcount > 0:
-            bot.send_message(message.chat.id, f"✅ מעולה! התחום '*{word}*' נוסף בהצלחה למערכת.\nאנחנו נתחיל לסרוק לקוחות שמחפשים את השירות הזה, ונשלח לך לכאן רק לידים רותחים! 🔥", parse_mode="Markdown")
+            bot.send_message(
+                message.chat.id,
+                f"✅ מעולה! התחום '*{word}*' נוסף בהצלחה למערכת.\nאנחנו נתחיל לסרוק לקוחות שמחפשים את השירות הזה, ונשלח לך לכאן רק לידים רותחים! 🔥",
+                parse_mode="Markdown"
+            )
         else:
             bot.send_message(message.chat.id, f"⚠️ התחום '*{word}*' כבר מוגדר אצלך במערכת.", parse_mode="Markdown")
 
@@ -139,8 +153,58 @@ def process_new_keyword(message, category):
         bot.send_message(message.chat.id, f"❌ שגיאה בשמירת הנתונים: {e}")
 
 
+# ==========================================
+# --- פעולה: ניהול ומחיקת שירותים ---
+# ==========================================
+def show_services_for_management(message):
+    user_chat_id = str(message.chat.id)
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT word FROM keywords WHERE chat_id = %s AND category = 'context';", (user_chat_id,))
+        rows = cursor.fetchall()
+        conn.close()
+
+        if not rows:
+            bot.send_message(message.chat.id, "עדיין לא הגדרת תחומי התמחות. לחץ על 'הוספת תחום התמחות' כדי להתחיל.")
+            return
+
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        for row in rows:
+            word = row[0]
+            markup.add(types.InlineKeyboardButton(f"🗑️ מחיקה: {word}", callback_data=f"del_srv_{word}"))
+
+        bot.send_message(
+            message.chat.id,
+            "⚙️ *ניהול תחומי התמחות*\n\nאלו התחומים שמוגדרים לך כרגע.\nלחץ על כפתור כדי למחוק את התחום ולהפסיק לקבל לידים עבורו:",
+            reply_markup=markup,
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ שגיאה בשליפת נתונים: {e}")
+
+
+def delete_service(call):
+    word_to_delete = call.data.replace("del_srv_", "")
+    user_chat_id = str(call.message.chat.id)
+
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM keywords WHERE word = %s AND chat_id = %s;", (word_to_delete, user_chat_id))
+        conn.commit()
+        conn.close()
+
+        bot.edit_message_text(
+            f"✅ התחום '*{word_to_delete}*' הוסר בהצלחה.\nלא תקבל יותר לידים עבורו.",
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        bot.send_message(call.message.chat.id, f"❌ שגיאה במחיקה: {e}")
+
+
 if __name__ == "__main__":
-    # מפעיל את שרת ה-Flask ברקע כדי ש-Render לא יכבה את התוכנה
     threading.Thread(target=run_flask).start()
-    # מפעיל את הבוט של טלגרם
     bot.infinity_polling()
