@@ -3,7 +3,7 @@ name: Daily Reddit Lead Scanner
 on:
   schedule:
     # הקוד ירוץ כל 4 שעות 
-    - cron: '0 */4 * * *'
+    - cron: '*/30 * * * *'
   workflow_dispatch:
 
 jobs:
