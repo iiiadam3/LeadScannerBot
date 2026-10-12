@@ -3,6 +3,7 @@ import telebot
 from telebot import types
 import psycopg2
 from flask import Flask
+from flask import request
 import threading
 from dotenv import load_dotenv
 
@@ -18,6 +19,15 @@ app = Flask(__name__)
 @app.route('/')
 def alive():
     return "Bot is alive!"
+
+
+@app.route('/' + TELEGRAM_TOKEN, methods=['POST'])
+def webhook():
+    # קבלת ההודעה מטלגרם והעברתה לטיפול של הבוט
+    json_string = request.get_data().decode('utf-8')
+    update = telebot.types.Update.de_json(json_string)
+    bot.process_new_updates([update])
+    return "OK", 200
 
 
 def run_flask():
@@ -205,5 +215,4 @@ def delete_service(call):
 
 
 if __name__ == "__main__":
-    threading.Thread(target=run_flask).start()
-    bot.infinity_polling()
+    run_flask()
