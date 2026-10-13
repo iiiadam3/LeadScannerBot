@@ -1,8 +1,15 @@
+import urllib.parse
 import os
 import requests
 import feedparser
+# הוסף את השורה הזו כדי לעקוף את החסימה של Upwork:
+feedparser.USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 import psycopg2
 import pandas as pd
+from dotenv import load_dotenv
+
+
+load_dotenv() # פוקד על פייתון לקרוא את קובץ ה-.env המקומי
 
 pd.set_option('display.max_colwidth', None)
 
@@ -121,9 +128,23 @@ def main():
     target_subreddit = "shopify+wordpress+smallbusiness+forhire+startups+Entrepreneur+freelance+webdev+programmingrequests"
 
     rss_feeds = [
-        {"source": "Reddit", "url": f"https://www.reddit.com/r/{target_subreddit}/new.rss"},
-        {"source": "Upwork", "url": "https://www.upwork.com/ab/feed/jobs/rss?sort=recency&q=developer"}
+        {"source": "Reddit", "url": f"https://www.reddit.com/r/{target_subreddit}/new.rss"}
     ]
+
+    # 2. הוספה דינמית של פידים מ-Upwork על בסיס מילות המפתח שהמשתמשים הזינו בטלגרם
+    # (בהנחה ש-context_keywords נשלף לפני כן ממסד הנתונים)
+    # איסוף כל מילות המפתח של כל המשתמשים לרשימה אחת ללא כפילויות
+    all_keywords = set()
+    for keywords in user_profiles.values():
+        all_keywords.update(keywords)
+
+    # הוספה דינמית של פידים מ-Upwork על בסיס המילים שנאספו
+    for word in all_keywords:
+        safe_word = urllib.parse.quote(word)
+        rss_feeds.append({
+            "source": "Upwork",
+            "url": f"https://www.upwork.com/ab/feed/jobs/rss?sort=recency&q={safe_word}"
+        })
 
     agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36'
 
@@ -138,12 +159,15 @@ def main():
             print(f"Failed to fetch {source_name}: {e}")
             continue
 
+
+
         for entry in feed.entries:
             title = entry.get('title', '').lower()
             text = entry.get('summary', '').lower()
             content = title + " " + text
 
             lead_title = entry.get('title', '')
+            print(f"Scanning post: {lead_title}")
             lead_link = entry.get('link', '')
             lead_date = entry.get('published', 'No Date')
 
