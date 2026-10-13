@@ -1,20 +1,46 @@
-# 🚀 Automated Reddit Lead Scanner
+# AI-Powered Lead Aggregation Bot 🎯
 
-A Python-based automation tool designed to autonomously scout, filter, and deliver high-quality freelance leads from Reddit directly to an email inbox.
+A fully autonomous, serverless data pipeline that scans platforms like Reddit, Upwork, and WeWorkRemotely for high-quality freelance leads, evaluates their purchasing intent using an LLM (OpenAI), and delivers real-time notifications via a Telegram Bot.
 
-## 📖 The Motivation
-Searching for freelance gigs on platforms like Reddit involves sifting through hundreds of irrelevant posts. I built this tool to automate the prospecting phase. By the time I wake up, the script has already scanned targeted subreddits, filtered out the noise, and emailed me a clean CSV of potential clients.
+## 🚀 Key Features
+- **Smart Intent Scoring:** Uses the OpenAI API (`gpt-4o-mini`) to process post content and grade buying intent (1-10), filtering out noise, tutorials, and unpaid requests.
+- **Dynamic Sourcing:** Dynamically generates RSS queries based on user-defined keywords stored in the database.
+- **Idempotency & Multi-Tenancy:** Uses a PostgreSQL database with strict `UNIQUE (link, chat_id)` constraints to manage multiple users and prevent duplicate notifications.
+- **Telegram Interface:** Users can easily add/remove context keywords and check their lead statistics via an interactive Telegram Bot.
 
-## ✨ Key Features
-* **Smart 2D Filtering:** Moves beyond basic keyword searches. It requires a match in both **Intent** (e.g., "looking for a developer", "willing to pay") and **Context** (e.g., "Wordpress", "Shopify"), while strictly avoiding **Negative** keywords (e.g., "hire me", "tutorial").
-* **Bypassing Anti-Scraping Protocols:** Successfully navigated Reddit's 403 API blocks (Responsible Builder Policy) by architecting a local automation pipeline instead of relying on easily blocked cloud servers.
-* **Zero-Touch Execution:** Fully automated using a batch script and Windows Task Scheduler to run silently in the background daily.
-* **Automated Reporting:** Generates a pandas DataFrame, converts it to a CSV, and securely emails it using the `smtplib` library.
+## 🛠️ Tech Stack & Architecture
+- **Backend:** Python, Flask (Webhook integration)
+- **Database:** PostgreSQL (Hosted on Supabase)
+- **Automation:** Cron-jobs triggering a Python scraper every 30 minutes
+- **AI Integration:** OpenAI API
+- **Deployment:** Render (Telegram Bot web service), GitHub Actions / Cron-job.org
 
-## 🛠️ Tech Stack
-* **Language:** Python 3
-* **Libraries:** `pandas` (Data manipulation), `requests` (HTTP client), `smtplib` / `email` (SMTP protocol)
-* **Automation:** Windows Task Scheduler, Batch Scripting (.bat)
+## 📸 Sneak Peek
+<img width="547" height="393" alt="Screenshot 2026-10-12 160934" src="https://github.com/user-attachments/assets/8d68c2f7-77a9-4535-aeda-cb468e5a7ed7" />
+<img width="598" height="782" alt="Screenshot 2026-10-13 151323" src="https://github.com/user-attachments/assets/d0f0865d-1a8e-4623-8e80-28c1f381b7a3" />
 
-## 💡 What I Learned
-This project was an excellent exercise in building a complete Data Pipeline (ETL) and handling real-world network challenges. Dealing with Reddit's restrictive API taught me how to pivot architectures quickly and build resilient, locally-hosted automation solutions.
+## ⚙️ How to Run Locally
+
+1. **Clone the repository:**
+   ```bash
+   git clone [https://github.com/iiiadam3/LeadScannerBot.git](https://github.com/iiiadam3/LeadScannerBot.git)
+   cd LeadScannerBot
+   ```
+
+2. **Install dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. **Set up Environment Variables:**
+   Create a `.env` file in the root directory and add the following:
+   ```env
+   TELEGRAM_TOKEN=your_telegram_bot_token
+   DATABASE_URL=your_postgresql_database_url
+   OPENAI_API_KEY=your_openai_api_key
+   ```
+
+4. **Run the Scanner:**
+   ```bash
+   python LeadScanner.py
+   ```
