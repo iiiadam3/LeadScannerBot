@@ -47,7 +47,7 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 # --- רשימות סינון גלובליות (מנוע ה-Backend) ---
 # ==========================================
 GLOBAL_INTENT = ["hiring", "looking for", "budget", "paid", "need a", "hire", "wanted", "seeking"]
-GLOBAL_NEGATIVE = ["for free", "how to", "tutorial", "student", "course", "unpaid", "advice on", "help me learn"]
+GLOBAL_NEGATIVE = ["for free", "how to", "tutorial", "student", "course", "unpaid", "advice on", "help me learn", "for hire", "[for hire]"]
 
 
 # ==========================================
@@ -127,6 +127,23 @@ def main():
     print(f"Found {len(user_profiles)} active users. Starting aggregation...")
 
     target_subreddit = "shopify+wordpress+smallbusiness+forhire+startups+Entrepreneur+freelance+webdev+programmingrequests"
+
+    # 1. הגדרת הרשימה עם המקור הראשון (Reddit)
+    rss_feeds = [
+        {"source": "Reddit", "url": f"https://www.reddit.com/r/{target_subreddit}/new.rss"}
+    ]
+
+    # 2. הוספת Upwork (דינמי לפי מילות המפתח)
+    all_keywords = set()
+    for keywords in user_profiles.values():
+        all_keywords.update(keywords)
+
+    for word in all_keywords:
+        safe_word = urllib.parse.quote(word)
+        rss_feeds.append({
+            "source": "Upwork",
+            "url": f"https://www.upwork.com/ab/feed/jobs/rss?sort=recency&q={safe_word}"
+        })
 
     # 3. הוספת WeWorkRemotely כמקור פתוח ויציב
     rss_feeds.append({
