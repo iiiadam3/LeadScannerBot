@@ -1,4 +1,5 @@
 import urllib.parse
+import cloudscraper
 import os
 import requests
 import feedparser
@@ -127,26 +128,16 @@ def main():
 
     target_subreddit = "shopify+wordpress+smallbusiness+forhire+startups+Entrepreneur+freelance+webdev+programmingrequests"
 
-    rss_feeds = [
-        {"source": "Reddit", "url": f"https://www.reddit.com/r/{target_subreddit}/new.rss"}
-    ]
-
-    # 2. הוספה דינמית של פידים מ-Upwork על בסיס מילות המפתח שהמשתמשים הזינו בטלגרם
-    # (בהנחה ש-context_keywords נשלף לפני כן ממסד הנתונים)
-    # איסוף כל מילות המפתח של כל המשתמשים לרשימה אחת ללא כפילויות
-    all_keywords = set()
-    for keywords in user_profiles.values():
-        all_keywords.update(keywords)
-
-    # הוספה דינמית של פידים מ-Upwork על בסיס המילים שנאספו
-    for word in all_keywords:
-        safe_word = urllib.parse.quote(word)
-        rss_feeds.append({
-            "source": "Upwork",
-            "url": f"https://www.upwork.com/ab/feed/jobs/rss?sort=recency&q={safe_word}"
-        })
+    # 3. הוספת WeWorkRemotely כמקור פתוח ויציב
+    rss_feeds.append({
+        "source": "WeWorkRemotely",
+        "url": "https://weworkremotely.com/categories/remote-programming-jobs.rss"
+    })
 
     agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36'
+
+    # יצירת סקרייפר חכם לעקיפת חומות אש (כמו Cloudflare של Upwork)
+    scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True})
 
     for feed_info in rss_feeds:
         source_name = feed_info["source"]
@@ -154,7 +145,12 @@ def main():
         print(f"Fetching from {source_name}...")
 
         try:
-            feed = feedparser.parse(feed_url, agent=agent)
+            if source_name == "Upwork":
+                # שימוש ב-cloudscraper כדי לשאוב את הנתונים הגולמיים ולעקוף חסימות
+                raw_xml = scraper.get(feed_url).text
+                feed = feedparser.parse(raw_xml)
+            else:
+                feed = feedparser.parse(feed_url, agent=agent)
         except Exception as e:
             print(f"Failed to fetch {source_name}: {e}")
             continue
