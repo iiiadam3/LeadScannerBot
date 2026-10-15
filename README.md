@@ -23,7 +23,7 @@ A fully autonomous, serverless data pipeline that scans platforms like Reddit, U
 
 1. **Clone the repository:**
    ```bash
-   git clone [https://github.com/iiiadam3/LeadScannerBot.git](https://github.com/iiiadam3/LeadScannerBot.git)
+   git clone https://github.com/iiiadam3/LeadScannerBot.git
    cd LeadScannerBot
    ```
 
