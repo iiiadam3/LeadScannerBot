@@ -1,83 +1,143 @@
-import urllib.parse
-import cloudscraper
+import logging
 import os
-import requests
+import re
+from contextlib import closing
+
 import feedparser
-# הוסף את השורה הזו כדי לעקוף את החסימה של Upwork:
-feedparser.USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 import psycopg2
-import pandas as pd
+import requests
 from dotenv import load_dotenv
 
+load_dotenv()
 
-load_dotenv() # פוקד על פייתון לקרוא את קובץ ה-.env המקומי
-
-pd.set_option('display.max_colwidth', None)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+logger = logging.getLogger("leadscanner")
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
-conn = psycopg2.connect(DATABASE_URL)
-cursor = conn.cursor()
-
-# ==========================================
-# --- עדכון סכמה אוטומטי ---
-# ==========================================
-try:
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS leads (
-        id SERIAL PRIMARY KEY,
-        date TEXT,
-        title TEXT,
-        link TEXT,
-        score INTEGER,
-        ai_score INTEGER,
-        chat_id TEXT
-    );
-    ''')
-    cursor.execute("ALTER TABLE leads DROP CONSTRAINT IF EXISTS leads_link_key CASCADE;")
-    cursor.execute("ALTER TABLE leads DROP CONSTRAINT IF EXISTS leads_link_chat_id_key CASCADE;")
-    cursor.execute("ALTER TABLE leads ADD CONSTRAINT leads_link_chat_id_key UNIQUE (link, chat_id);")
-    conn.commit()
-except Exception as e:
-    print(f"Schema update notice: {e}")
-    conn.rollback()
-
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
+# Timeouts in seconds: (connect, read). Without them requests can hang forever.
+HTTP_TIMEOUT = (5, 20)
+
+# An honest, identifiable User-Agent instead of a spoofed browser one.
+USER_AGENT = "LeadScannerBot/1.0 (personal lead-aggregation project)"
+
 # ==========================================
-# --- רשימות סינון גלובליות (מנוע ה-Backend) ---
+# --- Global filter lists ---
 # ==========================================
 GLOBAL_INTENT = ["hiring", "looking for", "budget", "paid", "need a", "hire", "wanted", "seeking"]
-GLOBAL_NEGATIVE = ["for free", "how to", "tutorial", "student", "course", "unpaid", "advice on", "help me learn", "for hire", "[for hire]"]
+GLOBAL_NEGATIVE = ["for free", "how to", "tutorial", "student", "course", "unpaid",
+                   "advice on", "help me learn", "for hire", "[for hire]"]
 
 
 # ==========================================
-# --- פונקציות עזר: AI וטלגרם ---
+# --- Keyword matching ---
+# ==========================================
+def compile_keyword_pattern(keywords):
+    """Build one regex that matches any keyword as a whole word / phrase.
+
+    (?<!\\w) and (?!\\w) act like \\b but also work for keywords that start or
+    end with a non-word character, such as "c++" or "[for hire]".
+    Returns None for an empty list.
+    """
+    cleaned = [k.strip() for k in keywords if k and k.strip()]
+    if not cleaned:
+        return None
+    parts = [re.escape(k) for k in cleaned]
+    return re.compile(r"(?<!\w)(?:" + "|".join(parts) + r")(?!\w)", re.IGNORECASE)
+
+
+INTENT_RE = compile_keyword_pattern(GLOBAL_INTENT)
+NEGATIVE_RE = compile_keyword_pattern(GLOBAL_NEGATIVE)
+
+
+# ==========================================
+# --- Database ---
+# ==========================================
+def get_connection():
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL is not set")
+    return psycopg2.connect(DATABASE_URL)
+
+
+def init_schema(conn):
+    """Idempotent schema setup. Runs inside the caller's connection."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS leads (
+                id SERIAL PRIMARY KEY,
+                date TEXT,
+                title TEXT,
+                link TEXT,
+                score INTEGER,
+                ai_score INTEGER,
+                chat_id TEXT,
+                CONSTRAINT leads_link_chat_id_key UNIQUE (link, chat_id)
+            );
+            """
+        )
+        # One-time cleanup of the legacy single-column constraint (no CASCADE needed).
+        cur.execute("ALTER TABLE leads DROP CONSTRAINT IF EXISTS leads_link_key;")
+    conn.commit()
+
+
+def load_user_profiles(conn):
+    """Return {chat_id: [context keywords]}."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT word, chat_id FROM keywords "
+            "WHERE category = 'context' AND chat_id IS NOT NULL;"
+        )
+        rows = cur.fetchall()
+
+    profiles = {}
+    for word, chat_id in rows:
+        profiles.setdefault(chat_id, []).append(word)
+    return profiles
+
+
+# ==========================================
+# --- External services: OpenAI and Telegram ---
 # ==========================================
 def get_ai_score(title, description):
+    """Return an int 1-10, 0 if AI scoring is disabled, or None on failure.
+
+    None (not a fake score) lets the caller skip the lead so it is retried on
+    the next run instead of being stored with a misleading value.
+    """
     if not OPENAI_API_KEY:
+        logger.warning("OPENAI_API_KEY is not set; AI scoring disabled")
         return 0
 
-    url = "https://api.openai.com/v1/chat/completions"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {OPENAI_API_KEY}"
-    }
-
-    prompt = f"You are a lead scoring bot for a freelancer. Rate the intent of this post to hire or pay for a digital service from 1 to 10. Return ONLY the number. Title: {title}. Content: {description}"
-
-    data = {
-        "model": "gpt-4o-mini",
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.2
-    }
-
+    prompt = (
+        "You are a lead scoring bot for a freelancer. Rate the intent of this post "
+        "to hire or pay for a digital service from 1 to 10. Return ONLY the number. "
+        f"Title: {title}. Content: {description}"
+    )
     try:
-        response = requests.post(url, headers=headers, json=data)
-        score = int(response.json()['choices'][0]['message']['content'].strip())
+        response = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+            json={
+                "model": "gpt-4o-mini",
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.2,
+            },
+            timeout=HTTP_TIMEOUT,
+        )
+        response.raise_for_status()
+        raw = response.json()["choices"][0]["message"]["content"].strip()
+        score = int(raw)
+        if not 1 <= score <= 10:
+            raise ValueError(f"score out of range: {score}")
         return score
-    except Exception as e:
-        print("AI Error:", e)
-        return 1
+    except (requests.RequestException, KeyError, IndexError, ValueError):
+        logger.exception("OpenAI scoring failed for %r", title)
+        return None
 
 
 def send_telegram_notification(bot_token, chat_id, title, link, date_str, source):
@@ -90,134 +150,123 @@ def send_telegram_notification(bot_token, chat_id, title, link, date_str, source
         f"📅 *תאריך:* {date_str}\n\n"
         f"🔗 [לחץ כאן לפתיחת הפוסט]({link})"
     )
-
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": message,
-        "parse_mode": "Markdown",
-        "disable_web_page_preview": False
-    }
     try:
-        requests.post(url, json=payload)
-    except Exception as e:
-        print(f"Telegram error: {e}")
+        response = requests.post(
+            f"https://api.telegram.org/bot{bot_token}/sendMessage",
+            json={
+                "chat_id": chat_id,
+                "text": message,
+                "parse_mode": "Markdown",
+                "disable_web_page_preview": False,
+            },
+            timeout=HTTP_TIMEOUT,
+        )
+        response.raise_for_status()
+    except requests.RequestException:
+        # Do not log the URL: it contains the bot token.
+        logger.error("Telegram notification to chat %s failed", chat_id, exc_info=False)
 
 
 # ==========================================
-# --- הפעלת התוכנית המרכזית (Main) ---
+# --- Feeds ---
 # ==========================================
+def build_feeds():
+    subreddits = ("shopify+wordpress+smallbusiness+forhire+startups+Entrepreneur"
+                  "+freelance+webdev+programmingrequests")
+    return [
+        {"source": "Reddit", "url": f"https://www.reddit.com/r/{subreddits}/new.rss"},
+        {"source": "WeWorkRemotely",
+         "url": "https://weworkremotely.com/categories/remote-programming-jobs.rss"},
+    ]
+
+
+def fetch_feed(url):
+    """Download with an explicit timeout, then hand the bytes to feedparser."""
+    response = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=HTTP_TIMEOUT)
+    response.raise_for_status()
+    return feedparser.parse(response.content)
+
+
+# ==========================================
+# --- Main ---
+# ==========================================
+def process_entry(conn, entry, source, profiles, patterns, telegram_token):
+    title = entry.get("title", "")
+    summary = entry.get("summary", "")
+    link = entry.get("link", "")
+    date_str = entry.get("published", "No Date")
+    content = f"{title} {summary}"
+
+    if not link:
+        return
+
+    if not INTENT_RE.search(content) or NEGATIVE_RE.search(content):
+        return
+
+    ai_score = None
+    for chat_id, pattern in patterns.items():
+        if not pattern.search(content):
+            continue
+
+        if ai_score is None:
+            ai_score = get_ai_score(title, summary)
+            if ai_score is None:
+                return  # AI failed: skip, retry on the next run
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO leads (date, title, link, score, ai_score, chat_id)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (link, chat_id) DO NOTHING
+                    """,
+                    (date_str, title, link, 0, ai_score, chat_id),
+                )
+                is_new = cur.rowcount > 0
+            conn.commit()
+        except psycopg2.Error:
+            logger.exception("DB error saving lead for user %s", chat_id)
+            conn.rollback()
+            continue
+
+        if is_new and ai_score >= 7:
+            send_telegram_notification(
+                telegram_token, chat_id, f"🔥 ציון: {ai_score} | {title}",
+                link, date_str, source,
+            )
+
+
 def main():
     telegram_token = os.environ.get("TELEGRAM_TOKEN")
 
-    # משיכת תחומי ההתמחות בלבד מהמשתמשים (קטגוריית context)
-    cursor.execute("SELECT word, chat_id FROM keywords WHERE category = 'context' AND chat_id IS NOT NULL;")
-    rows = cursor.fetchall()
+    # closing() guarantees conn.close() even if an exception escapes.
+    with closing(get_connection()) as conn:
+        init_schema(conn)
+        profiles = load_user_profiles(conn)
 
-    user_profiles = {}
-    for word, chat_id in rows:
-        if chat_id not in user_profiles:
-            user_profiles[chat_id] = []
-        user_profiles[chat_id].append(word)
+        if not profiles:
+            logger.info("No active users with contexts found.")
+            return
 
-    if not user_profiles:
-        print("No active users with contexts found.")
-        return
+        # Compile each user's regex once, not once per post.
+        patterns = {cid: compile_keyword_pattern(words) for cid, words in profiles.items()}
+        patterns = {cid: p for cid, p in patterns.items() if p is not None}
+        logger.info("Found %d active users. Starting aggregation...", len(patterns))
 
-    print(f"Found {len(user_profiles)} active users. Starting aggregation...")
+        for feed_info in build_feeds():
+            source = feed_info["source"]
+            logger.info("Fetching from %s...", source)
+            try:
+                feed = fetch_feed(feed_info["url"])
+            except requests.RequestException:
+                logger.exception("Failed to fetch %s", source)
+                continue
 
-    target_subreddit = "shopify+wordpress+smallbusiness+forhire+startups+Entrepreneur+freelance+webdev+programmingrequests"
+            for entry in feed.entries:
+                process_entry(conn, entry, source, profiles, patterns, telegram_token)
 
-    # 1. הגדרת הרשימה עם המקור הראשון (Reddit)
-    rss_feeds = [
-        {"source": "Reddit", "url": f"https://www.reddit.com/r/{target_subreddit}/new.rss"}
-    ]
-
-    # 2. הוספת Upwork (דינמי לפי מילות המפתח)
-    all_keywords = set()
-    for keywords in user_profiles.values():
-        all_keywords.update(keywords)
-
-    for word in all_keywords:
-        safe_word = urllib.parse.quote(word)
-        rss_feeds.append({
-            "source": "Upwork",
-            "url": f"https://www.upwork.com/ab/feed/jobs/rss?sort=recency&q={safe_word}"
-        })
-
-    # 3. הוספת WeWorkRemotely כמקור פתוח ויציב
-    rss_feeds.append({
-        "source": "WeWorkRemotely",
-        "url": "https://weworkremotely.com/categories/remote-programming-jobs.rss"
-    })
-
-    agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36'
-
-    # יצירת סקרייפר חכם לעקיפת חומות אש (כמו Cloudflare של Upwork)
-    scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True})
-
-    for feed_info in rss_feeds:
-        source_name = feed_info["source"]
-        feed_url = feed_info["url"]
-        print(f"Fetching from {source_name}...")
-
-        try:
-            if source_name == "Upwork":
-                # שימוש ב-cloudscraper כדי לשאוב את הנתונים הגולמיים ולעקוף חסימות
-                raw_xml = scraper.get(feed_url).text
-                feed = feedparser.parse(raw_xml)
-            else:
-                feed = feedparser.parse(feed_url, agent=agent)
-        except Exception as e:
-            print(f"Failed to fetch {source_name}: {e}")
-            continue
-
-
-
-        for entry in feed.entries:
-            title = entry.get('title', '').lower()
-            text = entry.get('summary', '').lower()
-            content = title + " " + text
-
-            lead_title = entry.get('title', '')
-            print(f"Scanning post: {lead_title}")
-            lead_link = entry.get('link', '')
-            lead_date = entry.get('published', 'No Date')
-
-            ai_score = None
-
-            for chat_id, context_keywords in user_profiles.items():
-                if not context_keywords:
-                    continue
-
-                # שימוש ברשימות הגלובליות מול ההקשר הספציפי של המשתמש
-                contains_intent = any(k in content for k in GLOBAL_INTENT)
-                contains_context = any(k in content for k in context_keywords)
-                contains_negative = any(k in content for k in GLOBAL_NEGATIVE)
-
-                if contains_intent and contains_context and not contains_negative:
-                    if ai_score is None:
-                        ai_score = get_ai_score(entry.get('title', ''), entry.get('summary', ''))
-
-                    try:
-                        cursor.execute('''
-                        INSERT INTO leads (date, title, link, score, ai_score, chat_id)
-                        VALUES (%s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (link, chat_id) DO NOTHING
-                        ''', (lead_date, lead_title, lead_link, 0, ai_score, chat_id))
-
-                        if cursor.rowcount > 0 and ai_score >= 7:
-                            title_with_score = f"🔥 ציון: {ai_score} | {lead_title}"
-                            send_telegram_notification(telegram_token, chat_id, title_with_score, lead_link, lead_date,
-                                                       source_name)
-
-                    except Exception as e:
-                        print(f"DB Error for user {chat_id}: {e}")
-                        conn.rollback()
-
-    conn.commit()
-    conn.close()
-    print("Multi-source scrape completed successfully.")
+    logger.info("Multi-source scrape completed.")
 
 
 if __name__ == "__main__":
