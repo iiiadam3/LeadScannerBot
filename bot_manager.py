@@ -1,13 +1,18 @@
 import os
+import logging
+from contextlib import closing
 import telebot
 from telebot import types
 import psycopg2
-from flask import Flask
-from flask import request
-import threading
+from flask import Flask, request
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -94,13 +99,11 @@ def show_stats(message):
     user_chat_id = str(message.chat.id)
 
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM leads WHERE chat_id = %s;", (user_chat_id,))
-        total_leads = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM leads WHERE ai_score >= 7 AND chat_id = %s;", (user_chat_id,))
-        hot_leads = cursor.fetchone()[0]
-        conn.close()
+        with closing(get_db_connection()) as conn, conn.cursor() as cursor:
+            cursor.execute("SELECT COUNT(*) FROM leads WHERE chat_id = %s;", (user_chat_id,))
+            total_leads = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM leads WHERE ai_score >= 7 AND chat_id = %s;", (user_chat_id,))
+            hot_leads = cursor.fetchone()[0]
 
         stats_text = (
             f"📊 *הסטטיסטיקות שלך:*\n\n"
@@ -110,7 +113,12 @@ def show_stats(message):
         )
         bot.edit_message_text(stats_text, chat_id=message.chat.id, message_id=msg.message_id, parse_mode="Markdown")
     except Exception as e:
-        bot.edit_message_text(f"❌ שגיאה בשליפת נתונים: {e}", chat_id=message.chat.id, message_id=msg.message_id)
+        logging.error(f"Error fetching stats for chat_id {user_chat_id}: {e}")
+        bot.edit_message_text(
+            "❌ אירעה שגיאה זמנית בשליפת הנתונים. נסה שוב מאוחר יותר.",
+            chat_id=message.chat.id,
+            message_id=msg.message_id
+        )
 
 
 # ==========================================
@@ -126,7 +134,7 @@ def ask_for_service(message):
 
 
 def process_new_keyword(message, category):
-    if message.text == '/cancel':
+    if not message.text or message.text == '/cancel':
         bot.send_message(message.chat.id, "הפעולה בוטלה.\n_(לחץ /start לחזרה לתפריט הראשי)_", parse_mode="Markdown")
         return
 
@@ -134,27 +142,29 @@ def process_new_keyword(message, category):
     user_chat_id = str(message.chat.id)
 
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO keywords (word, category, chat_id) VALUES (%s, %s, %s) ON CONFLICT (word, chat_id) DO NOTHING;",
-            (word, category, user_chat_id))
+        with closing(get_db_connection()) as conn, conn.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO keywords (word, category, chat_id) VALUES (%s, %s, %s) ON CONFLICT (word, chat_id) DO NOTHING;",
+                (word, category, user_chat_id)
+            )
+            inserted = cursor.rowcount > 0
+            conn.commit()
 
-        if cursor.rowcount > 0:
+        if inserted:
             bot.send_message(
                 message.chat.id,
                 f"✅ מעולה! התחום '*{word}*' נוסף בהצלחה למערכת.\nאנחנו נתחיל לסרוק לקוחות שמחפשים את השירות הזה, ונשלח לך לכאן רק לידים רותחים! 🔥\n\n_(לחץ /start לחזרה לתפריט הראשי)_",
                 parse_mode="Markdown"
             )
         else:
-            bot.send_message(message.chat.id,
-                             f"⚠️ התחום '*{word}*' כבר מוגדר אצלך במערכת.\n\n_(לחץ /start לחזרה לתפריט הראשי)_",
-                             parse_mode="Markdown")
-
-        conn.commit()
-        conn.close()
+            bot.send_message(
+                message.chat.id,
+                f"⚠️ התחום '*{word}*' כבר מוגדר אצלך במערכת.\n\n_(לחץ /start לחזרה לתפריט הראשי)_",
+                parse_mode="Markdown"
+            )
     except Exception as e:
-        bot.send_message(message.chat.id, f"❌ שגיאה בשמירת הנתונים: {e}")
+        logging.error(f"Error inserting keyword '{word}' for chat_id {user_chat_id}: {e}")
+        bot.send_message(message.chat.id, "❌ אירעה שגיאה זמנית בשמירת הנתונים. נסה שוב מאוחר יותר.")
 
 
 # ==========================================
@@ -163,24 +173,23 @@ def process_new_keyword(message, category):
 def show_services_for_management(message):
     user_chat_id = str(message.chat.id)
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT word FROM keywords WHERE chat_id = %s AND category = 'context';", (user_chat_id,))
-        rows = cursor.fetchall()
-        conn.close()
+        with closing(get_db_connection()) as conn, conn.cursor() as cursor:
+            cursor.execute("SELECT word FROM keywords WHERE chat_id = %s AND category = 'context';", (user_chat_id,))
+            rows = cursor.fetchall()
 
         markup = types.InlineKeyboardMarkup(row_width=1)
         if not rows:
-            bot.send_message(message.chat.id,
-                             "עדיין לא הגדרת תחומי התמחות. לחץ על 'הוספת תחום התמחות' כדי להתחיל.\n\n_(לחץ /start לחזרה)_",
-                             parse_mode="Markdown")
+            bot.send_message(
+                message.chat.id,
+                "עדיין לא הגדרת תחומי התמחות. לחץ על 'הוספת תחום התמחות' כדי להתחיל.\n\n_(לחץ /start לחזרה)_",
+                parse_mode="Markdown"
+            )
             return
 
         for row in rows:
             word = row[0]
             markup.add(types.InlineKeyboardButton(f"🗑️ מחיקה: {word}", callback_data=f"del_srv_{word}"))
 
-        # הוספת כפתור חזרה לתפריט
         markup.add(types.InlineKeyboardButton("🔙 חזרה לתפריט הראשי", callback_data="main_menu"))
 
         bot.send_message(
@@ -190,7 +199,8 @@ def show_services_for_management(message):
             parse_mode="Markdown"
         )
     except Exception as e:
-        bot.send_message(message.chat.id, f"❌ שגיאה בשליפת נתונים: {e}")
+        logging.error(f"Error loading services for chat_id {user_chat_id}: {e}")
+        bot.send_message(message.chat.id, "❌ אירעה שגיאה זמנית בשליפת הנתונים. נסה שוב מאוחר יותר.")
 
 
 def delete_service(call):
@@ -198,11 +208,9 @@ def delete_service(call):
     user_chat_id = str(call.message.chat.id)
 
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM keywords WHERE word = %s AND chat_id = %s;", (word_to_delete, user_chat_id))
-        conn.commit()
-        conn.close()
+        with closing(get_db_connection()) as conn, conn.cursor() as cursor:
+            cursor.execute("DELETE FROM keywords WHERE word = %s AND chat_id = %s;", (word_to_delete, user_chat_id))
+            conn.commit()
 
         bot.edit_message_text(
             f"✅ התחום '*{word_to_delete}*' הוסר בהצלחה.\nלא תקבל יותר לידים עבורו.\n\n_(לחץ /start לחזרה לתפריט הראשי)_",
@@ -211,7 +219,8 @@ def delete_service(call):
             parse_mode="Markdown"
         )
     except Exception as e:
-        bot.send_message(call.message.chat.id, f"❌ שגיאה במחיקה: {e}")
+        logging.error(f"Error deleting keyword '{word_to_delete}' for chat_id {user_chat_id}: {e}")
+        bot.send_message(call.message.chat.id, "❌ אירעה שגיאה זמנית במחיקת התחום. נסה שוב מאוחר יותר.")
 
 
 if __name__ == "__main__":

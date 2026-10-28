@@ -1,19 +1,19 @@
 # AI-Powered Lead Aggregation Bot 🎯
 
-A fully autonomous, serverless data pipeline that scans platforms like Reddit, Upwork, and WeWorkRemotely for high-quality freelance leads, evaluates their purchasing intent using an LLM (OpenAI), and delivers real-time notifications via a Telegram Bot.
+An automated, multi-tenant lead aggregation system that scans platforms like Reddit, Upwork, and WeWorkRemotely for high-quality freelance leads, evaluates purchasing intent using an LLM (OpenAI), and delivers real-time notifications via an interactive Telegram Bot.
 
 ## 🚀 Key Features
-- **Smart Intent Scoring:** Uses the OpenAI API (`gpt-4o-mini`) to process post content and grade buying intent (1-10), filtering out noise, tutorials, and unpaid requests.
-- **Dynamic Sourcing:** Dynamically generates RSS queries based on user-defined keywords stored in the database.
-- **Idempotency & Multi-Tenancy:** Uses a PostgreSQL database with strict `UNIQUE (link, chat_id)` constraints to manage multiple users and prevent duplicate notifications.
-- **Telegram Interface:** Users can easily add/remove context keywords and check their lead statistics via an interactive Telegram Bot.
+- **Two-Stage Filtering (Regex + LLM):** Performs fast initial filtering using whole-word boundary regular expressions, then uses the OpenAI API (`gpt-4o-mini`) to grade buying intent (1–10), filtering out noise, tutorials, and unpaid requests.
+- **Dynamic RSS Sourcing:** Dynamically builds RSS queries based on user-defined keywords stored in PostgreSQL.
+- **Idempotency & Multi-Tenancy:** Uses a PostgreSQL database with strict `UNIQUE (link, chat_id)` constraints and `ON CONFLICT DO NOTHING` queries to support multiple users and prevent duplicate notifications.
+- **Interactive Telegram Interface:** Users can add/remove service keywords and view real-time lead statistics via an interactive Telegram Bot powered by Flask webhooks.
 
 ## 🛠️ Tech Stack & Architecture
-- **Backend:** Python, Flask (Webhook integration)
-- **Database:** PostgreSQL (Hosted on Supabase)
-- **Automation:** Cron-jobs triggering a Python scraper every 30 minutes
-- **AI Integration:** OpenAI API
-- **Deployment:** Render (Telegram Bot web service), GitHub Actions / Cron-job.org
+- **Bot Webhook Server:** Python, Flask, `pyTelegramBotAPI` (deployed as a Web Service on Render)
+- **Scheduled Lead Scanner:** Python worker triggered every 30 minutes via GitHub Actions Cron
+- **Database:** PostgreSQL (hosted on Supabase)
+- **AI Integration:** OpenAI API (`gpt-4o-mini`)
+- **Testing:** `pytest` & `unittest.mock`
 
 ## 📸 Sneak Peek
 <img width="547" height="393" alt="Screenshot 2026-10-12 160934" src="https://github.com/user-attachments/assets/8d68c2f7-77a9-4535-aeda-cb468e5a7ed7" />
@@ -33,14 +33,23 @@ A fully autonomous, serverless data pipeline that scans platforms like Reddit, U
    ```
 
 3. **Set up Environment Variables:**
-   Create a `.env` file in the root directory and add the following:
+   Create a local `.env` file in the root directory (this file is git-ignored) and insert your own API keys:
    ```env
-   TELEGRAM_TOKEN=your_telegram_bot_token
-   DATABASE_URL=your_postgresql_database_url
-   OPENAI_API_KEY=your_openai_api_key
+   TELEGRAM_TOKEN=<insert_your_telegram_bot_token>
+   DATABASE_URL=<insert_your_postgresql_connection_url>
+   OPENAI_API_KEY=<insert_your_openai_api_key>
    ```
 
-4. **Run the Scanner:**
+4. **Run the Scanner or Bot Server:**
    ```bash
+   # Run a single lead scan cycle
    python LeadScanner.py
+
+   # Start the Flask webhook server for the Telegram bot
+   python bot_manager.py
+   ```
+
+5. **Run Unit Tests:**
+   ```bash
+   pytest
    ```
