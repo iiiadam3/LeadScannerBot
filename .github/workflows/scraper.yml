@@ -1,4 +1,4 @@
-name: Daily Reddit Lead Scanner
+name: Lead Scanner
 
 on:
   schedule:
@@ -23,8 +23,6 @@ jobs:
       - name: Run Lead Scanner
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: python LeadScanner.py
