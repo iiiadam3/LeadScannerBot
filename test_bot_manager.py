@@ -118,6 +118,8 @@ def test_a_telegram_outage_does_not_stop_the_service_starting(monkeypatch):
 def test_a_missing_token_says_so_in_plain_words(monkeypatch):
     """It used to fail with "'NoneType' object is not iterable", which named nothing."""
     monkeypatch.delenv("TELEGRAM_TOKEN", raising=False)
+    # A local .env would put the token back during the re-import, so stop it loading.
+    monkeypatch.setattr("dotenv.load_dotenv", lambda *args, **kwargs: False)
     sys.modules.pop("bot_manager", None)
     try:
         with pytest.raises(RuntimeError, match="TELEGRAM_TOKEN"):
