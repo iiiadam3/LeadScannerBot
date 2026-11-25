@@ -198,7 +198,7 @@ def test_ai_disabled_score_zero_saves_but_never_notifies(ai, notify):
 
 
 def test_init_schema_creates_keywords_table():
-    from LeadScanner import init_schema
+    from db_schema import init_schema
     conn, cur = make_conn()
     init_schema(conn)
 
