@@ -1,55 +1,69 @@
-# AI-Powered Lead Aggregation Bot 🎯
+# LeadScannerBot 🎯
 
-An automated, multi-tenant lead aggregation system that scans platforms like Reddit, Upwork, and WeWorkRemotely for high-quality freelance leads, evaluates purchasing intent using an LLM (OpenAI), and delivers real-time notifications via an interactive Telegram Bot.
+Finds people who are looking to pay for freelance work, scores how serious they are with an LLM, and sends the good ones to Telegram. Each user sets their own keywords, so one bot serves several freelancers.
 
-## 🚀 Key Features
-- **Two-Stage Filtering (Regex + LLM):** Performs fast initial filtering using whole-word boundary regular expressions, then uses the OpenAI API (`gpt-4o-mini`) to grade buying intent (1–10), filtering out noise, tutorials, and unpaid requests.
-- **Dynamic RSS Sourcing:** Dynamically builds RSS queries based on user-defined keywords stored in PostgreSQL.
-- **Idempotency & Multi-Tenancy:** Uses a PostgreSQL database with strict `UNIQUE (link, chat_id)` constraints and `ON CONFLICT DO NOTHING` queries to support multiple users and prevent duplicate notifications.
-- **Interactive Telegram Interface:** Users can add/remove service keywords and view real-time lead statistics via an interactive Telegram Bot powered by Flask webhooks.
+## How it works
 
-## 🛠️ Tech Stack & Architecture
-- **Bot Webhook Server:** Python, Flask, `pyTelegramBotAPI` (deployed as a Web Service on Render)
-- **Scheduled Lead Scanner:** Python worker triggered every 30 minutes via GitHub Actions Cron
-- **Database:** PostgreSQL (hosted on Supabase)
-- **AI Integration:** OpenAI API (`gpt-4o-mini`)
-- **Testing:** `pytest` & `unittest.mock`
+1. **Every 6 hours**, a GitHub Actions job runs the scanner.
+2. It pulls two RSS feeds: a set of subreddits (`r/forhire`, `r/webdev`, `r/startups` and others) and WeWorkRemotely's remote programming jobs.
+3. **First filter, regex.** A post has to contain a hiring word ("hiring", "budget", "looking for") and must not contain a disqualifying one ("tutorial", "unpaid", "for hire"). Matching is whole-word, so "ai" does not match inside "email", and it still works for keywords like `c++`.
+4. **Second filter, per user.** Each user's own keywords are compiled into one regex and matched against the post.
+5. **Scoring.** A post that survives both filters goes to the OpenAI API (`gpt-4o-mini`), which rates buying intent from 1 to 10. If the call fails the post is skipped entirely rather than stored with a made-up score, so the next run retries it.
+6. **Storing and alerting.** Leads go into PostgreSQL with a `UNIQUE (link, chat_id)` constraint and `ON CONFLICT DO NOTHING`, so the same post is never sent twice. Only scores of 7 or above trigger a Telegram message.
 
-## 📸 Sneak Peek
-<img width="547" height="393" alt="Screenshot 2026-10-12 160934" src="https://github.com/user-attachments/assets/8d68c2f7-77a9-4535-aeda-cb468e5a7ed7" />
-<img width="598" height="782" alt="Screenshot 2026-10-13 151323" src="https://github.com/user-attachments/assets/d0f0865d-1a8e-4623-8e80-28c1f381b7a3" />
+The Telegram bot is a separate Flask service. Users add and remove keywords and check their stats through it.
 
-## ⚙️ How to Run Locally
+## Design notes
 
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/iiiadam3/LeadScannerBot.git
-   cd LeadScannerBot
-   ```
+- **The bot is push, not pull.** Telegram posts updates to a webhook URL, so the app registers that URL with Telegram on startup, using Render's `RENDER_EXTERNAL_URL` (or `WEBHOOK_URL` if set). Doing it in code rather than by hand means a redeploy cannot silently leave the bot unreachable.
+- **Buttons carry a digest, not the keyword.** Telegram caps `callback_data` at 64 bytes, and Hebrew costs 2 bytes per letter, so a long keyword would overflow it. Delete buttons carry a 16-character hash instead, and the keyword is looked up from it.
+- **User text is escaped before it goes into a message.** Telegram's Markdown treats `_`, `*`, `` ` `` and `[` as formatting, so a keyword like `node_js` used to make the whole message fail to send with a 400.
+- **Failures are contained.** Requests have timeouts, database errors roll back and skip that lead rather than killing the run, and the bot token is never written to a log.
 
-2. **Install dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   ```
+## Known limitation: the free tier sleeps
 
-3. **Set up Environment Variables:**
-   Create a local `.env` file in the root directory (this file is git-ignored) and insert your own API keys:
-   ```env
-   TELEGRAM_TOKEN=<insert_your_telegram_bot_token>
-   DATABASE_URL=<insert_your_postgresql_connection_url>
-   OPENAI_API_KEY=<insert_your_openai_api_key>
-   ```
+The bot runs on Render's free plan, which suspends a service after about 15 minutes without traffic. Waking it takes roughly a minute, and Telegram gives up before that and retries, so the first message after a quiet period can take a minute to get an answer. Telegram queues undelivered updates and redelivers them, so nothing is lost. A paid instance removes the delay.
 
-4. **Run the Scanner or Bot Server:**
-   ```bash
-   # Run a single lead scan cycle
-   python LeadScanner.py
+## Testing
 
-   # Start the Flask webhook server for the Telegram bot
-   python bot_manager.py
-   ```
+`pytest` covers the parts worth protecting: whole-word keyword matching, the AI scoring path including failures and out-of-range answers, Markdown escaping, the 64-byte button limit, and webhook registration (including no URL configured and Telegram being unreachable). Nothing in the suite touches the network or a database. GitHub Actions runs it on every push and pull request.
 
-5. **Run Unit Tests:**
-   ```bash
-   pytest
-   ```
+```bash
+pip install -r requirements.txt -r requirements-dev.txt
+pytest
+```
+
+## Run it yourself
+
+```bash
+git clone https://github.com/iiiadam3/LeadScannerBot.git
+cd LeadScannerBot
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+Create a `.env` file (git-ignored):
+
+```env
+TELEGRAM_TOKEN=<token from @BotFather>
+DATABASE_URL=<postgresql connection url>
+OPENAI_API_KEY=<openai key>
+WEBHOOK_URL=<public https url of the bot service>   # optional; Render sets its own
+```
+
+```bash
+python LeadScanner.py     # one scan
+python bot_manager.py     # the Telegram bot
+```
+
+In production the bot runs under gunicorn: `gunicorn bot_manager:app`.
+
+## Tech stack
+
+Python · Flask · pyTelegramBotAPI · PostgreSQL (Supabase) · OpenAI API · GitHub Actions · pytest
+
+## Screenshots
+
+<img width="547" height="393" alt="Telegram bot menu" src="https://github.com/user-attachments/assets/8d68c2f7-77a9-4535-aeda-cb468e5a7ed7" />
+<img width="598" height="782" alt="Lead notification" src="https://github.com/user-attachments/assets/d0f0865d-1a8e-4623-8e80-28c1f381b7a3" />
