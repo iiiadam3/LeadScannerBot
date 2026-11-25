@@ -82,6 +82,18 @@ def init_schema(conn):
         )
         # One-time cleanup of the legacy single-column constraint (no CASCADE needed).
         cur.execute("ALTER TABLE leads DROP CONSTRAINT IF EXISTS leads_link_key;")
+        # Mirrors the Supabase table; bot_manager.py's ON CONFLICT relies on UNIQUE (word, chat_id).
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS keywords (
+                id SERIAL PRIMARY KEY,
+                word TEXT,
+                category TEXT,
+                chat_id TEXT,
+                UNIQUE (word, chat_id)
+            );
+            """
+        )
     conn.commit()
 
 

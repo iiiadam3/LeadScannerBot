@@ -195,3 +195,14 @@ def test_ai_disabled_score_zero_saves_but_never_notifies(ai, notify):
 
     cur.execute.assert_called_once()
     notify.assert_not_called()
+
+
+def test_init_schema_creates_keywords_table():
+    from LeadScanner import init_schema
+    conn, cur = make_conn()
+    init_schema(conn)
+
+    sqls = [" ".join(c.args[0].split()) for c in cur.execute.call_args_list]
+    assert any(s.startswith("CREATE TABLE IF NOT EXISTS keywords") for s in sqls)
+    assert any("UNIQUE (word, chat_id)" in s for s in sqls)
+    conn.commit.assert_called_once()
