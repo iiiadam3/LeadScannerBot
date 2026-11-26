@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+from collections import Counter
 from contextlib import closing
 
 import feedparser
@@ -121,8 +122,9 @@ def get_ai_score(title, description):
 
 
 def send_telegram_notification(bot_token, chat_id, title, link, date_str, source):
+    """Return True if Telegram accepted the message, False otherwise."""
     if not bot_token or not chat_id:
-        return
+        return False
 
     message = (
         f"🎯 *ליד חדש מ-{source}!*\n\n"
@@ -142,9 +144,11 @@ def send_telegram_notification(bot_token, chat_id, title, link, date_str, source
             timeout=HTTP_TIMEOUT,
         )
         response.raise_for_status()
+        return True
     except requests.RequestException:
         # Do not log the URL: it contains the bot token.
         logger.error("Telegram notification to chat %s failed", chat_id, exc_info=False)
+        return False
 
 
 # ==========================================
@@ -161,37 +165,92 @@ def build_feeds():
 
 
 def fetch_feed(url):
-    """Download with an explicit timeout, then hand the bytes to feedparser."""
+    """Download with an explicit timeout, then hand the bytes to feedparser.
+
+    Returns (feed, meta). meta describes the HTTP response so the caller can
+    log it: feedparser never raises on a non-feed body (e.g. an HTML "blocked"
+    page served with 200), it just returns zero entries and sets bozo.
+    """
     response = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=HTTP_TIMEOUT)
     response.raise_for_status()
-    return feedparser.parse(response.content)
+    feed = feedparser.parse(response.content)
+    meta = {
+        "status": response.status_code,
+        "content_type": response.headers.get("Content-Type", ""),
+        "bytes": len(response.content),
+        "entries": len(feed.entries),
+        "bozo": bool(feed.get("bozo")),
+        "bozo_reason": str(feed.get("bozo_exception", "")) if feed.get("bozo") else "",
+    }
+    return feed, meta
+
+
+def log_feed_meta(source, meta):
+    """Log one line per download; warn when a feed came back empty."""
+    logger.info(
+        "%s: status=%s content_type=%r bytes=%d entries=%d bozo=%s%s",
+        source, meta["status"], meta["content_type"], meta["bytes"], meta["entries"],
+        meta["bozo"], f" ({meta['bozo_reason']})" if meta["bozo_reason"] else "",
+    )
+    if meta["entries"] == 0:
+        logger.warning(
+            "%s returned 0 entries (status=%s, content_type=%r) - possibly blocked "
+            "or not a feed", source, meta["status"], meta["content_type"],
+        )
+
+
+STAT_KEYS = (
+    "entries", "no_link", "no_intent", "negative", "no_keyword_match",
+    "matched_users", "ai_failed", "ai_disabled", "inserted", "duplicate",
+    "db_error", "below_threshold", "notified", "notify_failed",
+)
+
+
+def format_stats(stats):
+    return " ".join(f"{k}={stats.get(k, 0)}" for k in STAT_KEYS)
 
 
 # ==========================================
 # --- Main ---
 # ==========================================
-def process_entry(conn, entry, source, profiles, patterns, telegram_token):
+def process_entry(conn, entry, source, profiles, patterns, telegram_token, stats=None):
+    """stats: optional collections.Counter; only counted into, never read."""
+    if stats is None:
+        stats = Counter()  # throwaway, so the code below needs no None checks
+
     title = entry.get("title", "")
     summary = entry.get("summary", "")
     link = entry.get("link", "")
     date_str = entry.get("published", "No Date")
     content = f"{title} {summary}"
+    stats["entries"] += 1
 
     if not link:
+        stats["no_link"] += 1
         return
 
-    if not INTENT_RE.search(content) or NEGATIVE_RE.search(content):
+    if not INTENT_RE.search(content):
+        stats["no_intent"] += 1
+        return
+    if NEGATIVE_RE.search(content):
+        stats["negative"] += 1
         return
 
     ai_score = None
+    matched_any = False
     for chat_id, pattern in patterns.items():
         if not pattern.search(content):
             continue
+        matched_any = True
+        stats["matched_users"] += 1
 
         if ai_score is None:
             ai_score = get_ai_score(title, summary)
             if ai_score is None:
+                stats["ai_failed"] += 1
                 return  # AI failed: skip, retry on the next run
+            if ai_score == 0:
+                stats["ai_disabled"] += 1
 
         try:
             with conn.cursor() as cur:
@@ -208,13 +267,25 @@ def process_entry(conn, entry, source, profiles, patterns, telegram_token):
         except psycopg2.Error:
             logger.exception("DB error saving lead for user %s", chat_id)
             conn.rollback()
+            stats["db_error"] += 1
             continue
 
-        if is_new and ai_score >= 7:
-            send_telegram_notification(
+        if not is_new:
+            stats["duplicate"] += 1
+            continue
+        stats["inserted"] += 1
+
+        if ai_score >= 7:
+            sent = send_telegram_notification(
                 telegram_token, chat_id, f"🔥 ציון: {ai_score} | {title}",
                 link, date_str, source,
             )
+            stats["notified" if sent else "notify_failed"] += 1
+        else:
+            stats["below_threshold"] += 1
+
+    if not matched_any:
+        stats["no_keyword_match"] += 1
 
 
 def main():
@@ -234,17 +305,24 @@ def main():
         patterns = {cid: p for cid, p in patterns.items() if p is not None}
         logger.info("Found %d active users. Starting aggregation...", len(patterns))
 
+        totals = Counter()
         for feed_info in build_feeds():
             source = feed_info["source"]
             logger.info("Fetching from %s...", source)
             try:
-                feed = fetch_feed(feed_info["url"])
+                feed, meta = fetch_feed(feed_info["url"])
             except requests.RequestException:
                 logger.exception("Failed to fetch %s", source)
                 continue
+            log_feed_meta(source, meta)
 
+            stats = Counter()
             for entry in feed.entries:
-                process_entry(conn, entry, source, profiles, patterns, telegram_token)
+                process_entry(conn, entry, source, profiles, patterns, telegram_token, stats)
+            logger.info("%s summary: %s", source, format_stats(stats))
+            totals.update(stats)
+
+        logger.info("Run totals: %s", format_stats(totals))
 
     logger.info("Multi-source scrape completed.")
 

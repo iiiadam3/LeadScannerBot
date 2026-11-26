@@ -206,3 +206,216 @@ def test_init_schema_creates_keywords_table():
     assert any(s.startswith("CREATE TABLE IF NOT EXISTS keywords") for s in sqls)
     assert any("UNIQUE (word, chat_id)" in s for s in sqls)
     conn.commit.assert_called_once()
+
+
+# ==========================================
+# --- Run diagnostics: counters and feed logging ---
+# ==========================================
+import logging
+from collections import Counter
+
+import LeadScanner
+from LeadScanner import fetch_feed, format_stats, send_telegram_notification
+
+
+def run_with_stats(conn, entry, patterns):
+    stats = Counter()
+    process_entry(conn, entry, "Reddit", {}, patterns, TOKEN, stats)
+    return stats
+
+
+@pytest.mark.parametrize("entry, key", [
+    pytest.param({**HOT_ENTRY, "link": ""}, "no_link", id="missing-link"),
+    pytest.param({**HOT_ENTRY, "title": "Python developer", "summary": "Flask API"},
+                 "no_intent", id="no-intent-word"),
+    pytest.param({**HOT_ENTRY, "summary": "Python tutorial, budget $500"},
+                 "negative", id="negative-word"),
+])
+def test_stats_filtered_out(entry, key, ai, notify):
+    conn, _ = make_conn()
+    stats = run_with_stats(conn, entry, make_patterns(u1=["python"]))
+    assert stats == Counter({"entries": 1, key: 1})
+
+
+def test_stats_no_keyword_match(ai, notify):
+    conn, _ = make_conn()
+    stats = run_with_stats(conn, HOT_ENTRY, make_patterns(u1=["shopify"]))
+    assert stats == Counter({"entries": 1, "no_keyword_match": 1})
+
+
+def test_stats_ai_failed(ai, notify):
+    ai.return_value = None
+    conn, _ = make_conn()
+    stats = run_with_stats(conn, HOT_ENTRY, make_patterns(u1=["python"]))
+    assert stats == Counter({"entries": 1, "matched_users": 1, "ai_failed": 1})
+
+
+def test_stats_ai_disabled(ai, notify):
+    ai.return_value = 0
+    conn, _ = make_conn()
+    stats = run_with_stats(conn, HOT_ENTRY, make_patterns(u1=["python"]))
+    assert stats["ai_disabled"] == 1
+    assert stats["inserted"] == 1
+    assert stats["below_threshold"] == 1
+
+
+def test_stats_inserted_and_notified(ai, notify):
+    notify.return_value = True
+    conn, _ = make_conn()
+    stats = run_with_stats(conn, HOT_ENTRY, make_patterns(u1=["python"], u2=["flask"]))
+    assert stats == Counter({"entries": 1, "matched_users": 2, "inserted": 2, "notified": 2})
+
+
+def test_stats_below_threshold(ai, notify):
+    ai.return_value = 6
+    conn, _ = make_conn()
+    stats = run_with_stats(conn, HOT_ENTRY, make_patterns(u1=["python"]))
+    assert stats == Counter({"entries": 1, "matched_users": 1, "inserted": 1,
+                             "below_threshold": 1})
+    notify.assert_not_called()
+
+
+def test_stats_duplicate(ai, notify):
+    conn, _ = make_conn(rowcount=0)
+    stats = run_with_stats(conn, HOT_ENTRY, make_patterns(u1=["python"]))
+    assert stats == Counter({"entries": 1, "matched_users": 1, "duplicate": 1})
+
+
+def test_stats_db_error(ai, notify):
+    notify.return_value = True
+    conn, _ = make_conn(execute_side_effect=[psycopg2.Error("boom"), None])
+    stats = run_with_stats(conn, HOT_ENTRY, make_patterns(u1=["python"], u2=["flask"]))
+    assert stats["db_error"] == 1
+    assert stats["inserted"] == 1
+    assert stats["notified"] == 1
+
+
+def test_stats_notify_failed(ai, notify):
+    notify.return_value = False
+    conn, _ = make_conn()
+    stats = run_with_stats(conn, HOT_ENTRY, make_patterns(u1=["python"]))
+    assert stats["notify_failed"] == 1
+    assert stats["notified"] == 0
+
+
+def test_process_entry_without_stats_still_works(ai, notify):
+    conn, cur = make_conn()
+    process_entry(conn, HOT_ENTRY, "Reddit", {}, make_patterns(u1=["python"]), TOKEN)
+    cur.execute.assert_called_once()
+    notify.assert_called_once()
+
+
+def test_format_stats_lists_every_key_with_zero_default():
+    line = format_stats(Counter({"entries": 3}))
+    assert line.startswith("entries=3 no_link=0")
+    assert "notify_failed=0" in line
+
+
+@patch("LeadScanner.requests.post")
+def test_send_telegram_notification_returns_true_on_success(mock_post):
+    mock_post.return_value.raise_for_status.return_value = None
+    assert send_telegram_notification(TOKEN, "u1", "t", "l", "d", "Reddit") is True
+
+
+@patch("LeadScanner.requests.post")
+def test_send_telegram_notification_returns_false_on_error(mock_post):
+    mock_post.side_effect = requests.ConnectionError("down")
+    assert send_telegram_notification(TOKEN, "u1", "t", "l", "d", "Reddit") is False
+
+
+def test_send_telegram_notification_returns_false_without_token():
+    assert send_telegram_notification(None, "u1", "t", "l", "d", "Reddit") is False
+
+
+VALID_RSS = b"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel><title>t</title>
+<item><title>Hiring a dev</title><link>https://example.com/1</link></item>
+<item><title>Need a site</title><link>https://example.com/2</link></item>
+</channel></rss>"""
+
+BLOCKED_HTML = b"<html><body><h1>Blocked</h1><p>Too many requests</p></body></html>"
+
+
+def fake_response(body, content_type, status=200):
+    resp = MagicMock()
+    resp.content = body
+    resp.status_code = status
+    resp.headers = {"Content-Type": content_type}
+    resp.raise_for_status.return_value = None
+    return resp
+
+
+@patch("LeadScanner.requests.get")
+def test_fetch_feed_valid_rss(mock_get):
+    mock_get.return_value = fake_response(VALID_RSS, "application/rss+xml")
+    feed, meta = fetch_feed("https://example.com/feed")
+    assert len(feed.entries) == 2
+    assert meta["status"] == 200
+    assert meta["entries"] == 2
+    assert meta["bytes"] == len(VALID_RSS)
+    assert meta["content_type"] == "application/rss+xml"
+
+
+@patch("LeadScanner.requests.get")
+def test_fetch_feed_html_with_200_gives_zero_entries_without_error(mock_get):
+    """A blocked HTML page with status 200 raises nothing. feedparser does not
+    even set bozo for well-formed HTML, so entries == 0 plus the content type
+    is the signal (log_feed_meta warns on it)."""
+    mock_get.return_value = fake_response(BLOCKED_HTML, "text/html; charset=utf-8")
+    feed, meta = fetch_feed("https://example.com/feed")
+    assert feed.entries == []
+    assert meta["entries"] == 0
+    assert meta["status"] == 200
+    assert meta["content_type"].startswith("text/html")
+
+
+@patch("LeadScanner.requests.get")
+def test_fetch_feed_reports_bozo_reason_for_broken_xml(mock_get):
+    mock_get.return_value = fake_response(b"<rss><channel><item>", "application/rss+xml")
+    _, meta = fetch_feed("https://example.com/feed")
+    assert meta["bozo"] is True
+    assert meta["bozo_reason"]
+
+
+@pytest.fixture
+def fake_main_env():
+    """Patch everything main() touches except the feed download."""
+    conn, _ = make_conn()
+    with patch("LeadScanner.get_connection", return_value=conn), \
+         patch("LeadScanner.init_schema"), \
+         patch("LeadScanner.load_user_profiles", return_value={"u1": ["python"]}), \
+         patch("LeadScanner.build_feeds", return_value=[
+             {"source": "Reddit", "url": "https://example.com/r"},
+             {"source": "WeWorkRemotely", "url": "https://example.com/w"},
+         ]), \
+         patch("LeadScanner.get_ai_score", return_value=8), \
+         patch("LeadScanner.send_telegram_notification", return_value=True):
+        yield
+
+
+@patch("LeadScanner.requests.get")
+def test_main_warns_on_empty_feed_and_logs_summaries(mock_get, fake_main_env, caplog):
+    mock_get.side_effect = [
+        fake_response(BLOCKED_HTML, "text/html"),
+        fake_response(VALID_RSS, "application/rss+xml"),
+    ]
+    with caplog.at_level(logging.INFO, logger="leadscanner"):
+        LeadScanner.main()
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("Reddit returned 0 entries" in m and "text/html" in m for m in warnings)
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(m.startswith("Reddit: status=200") and "entries=0" in m for m in messages)
+    assert any(m.startswith("Reddit summary: entries=0") for m in messages)
+    assert any(m.startswith("WeWorkRemotely summary: entries=2") for m in messages)
+    assert any(m.startswith("Run totals: entries=2") for m in messages)
+
+
+@patch("LeadScanner.requests.get")
+def test_main_does_not_log_feed_urls(mock_get, fake_main_env, caplog):
+    mock_get.return_value = fake_response(VALID_RSS, "application/rss+xml")
+    with caplog.at_level(logging.INFO, logger="leadscanner"):
+        LeadScanner.main()
+    assert not any("example.com/r" in r.getMessage() or "example.com/w" in r.getMessage()
+                   for r in caplog.records)
