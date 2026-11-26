@@ -5,7 +5,7 @@ Finds people who are looking to pay for freelance work, scores how serious they 
 ## How it works
 
 1. **Every 6 hours**, a GitHub Actions job runs the scanner.
-2. It pulls two RSS feeds: a set of subreddits (`r/forhire`, `r/webdev`, `r/startups` and others) and WeWorkRemotely's remote programming jobs.
+2. It pulls posts from each configured source. Today that is WeWorkRemotely's remote programming jobs RSS feed. Reddit was dropped in November 2026, when its RSS feeds were shut down. Adding a source takes one fetch function.
 3. **First filter, regex.** A post has to contain a hiring word ("hiring", "budget", "looking for") and must not contain a disqualifying one ("tutorial", "unpaid", "for hire"). Matching is whole-word, so "ai" does not match inside "email", and it still works for keywords like `c++`.
 4. **Second filter, per user.** Each user's own keywords are compiled into one regex and matched against the post.
 5. **Scoring.** A post that survives both filters goes to the OpenAI API (`gpt-4o-mini`), which rates buying intent from 1 to 10. If the call fails the post is skipped entirely rather than stored with a made-up score, so the next run retries it.

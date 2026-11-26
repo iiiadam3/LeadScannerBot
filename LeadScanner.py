@@ -152,15 +152,28 @@ def send_telegram_notification(bot_token, chat_id, title, link, date_str, source
 
 
 # ==========================================
-# --- Feeds ---
+# --- Sources ---
 # ==========================================
-def build_feeds():
-    subreddits = ("shopify+wordpress+smallbusiness+forhire+startups+Entrepreneur"
-                  "+freelance+webdev+programmingrequests")
+# A source is {"source": <name>, "fetch": <callable with no arguments>}.
+# fetch() returns (entries, meta):
+#   entries: dict-like items with "title", "summary", "link", "published"
+#            (the keys process_entry reads; missing keys are allowed).
+#   meta:    the keys log_feed_meta prints (status, content_type, bytes,
+#            entries, bozo, bozo_reason).
+# It may raise requests.RequestException; main() logs it and moves on.
+# To add a source, write a fetch function and add one entry to build_sources().
+def rss_source(name, url):
+    """A source backed by an RSS/Atom feed."""
+    def fetch():
+        feed, meta = fetch_feed(url)
+        return feed.entries, meta
+    return {"source": name, "fetch": fetch}
+
+
+def build_sources():
     return [
-        {"source": "Reddit", "url": f"https://www.reddit.com/r/{subreddits}/new.rss"},
-        {"source": "WeWorkRemotely",
-         "url": "https://weworkremotely.com/categories/remote-programming-jobs.rss"},
+        rss_source("WeWorkRemotely",
+                   "https://weworkremotely.com/categories/remote-programming-jobs.rss"),
     ]
 
 
@@ -306,18 +319,18 @@ def main():
         logger.info("Found %d active users. Starting aggregation...", len(patterns))
 
         totals = Counter()
-        for feed_info in build_feeds():
-            source = feed_info["source"]
+        for source_info in build_sources():
+            source = source_info["source"]
             logger.info("Fetching from %s...", source)
             try:
-                feed, meta = fetch_feed(feed_info["url"])
+                entries, meta = source_info["fetch"]()
             except requests.RequestException:
                 logger.exception("Failed to fetch %s", source)
                 continue
             log_feed_meta(source, meta)
 
             stats = Counter()
-            for entry in feed.entries:
+            for entry in entries:
                 process_entry(conn, entry, source, profiles, patterns, telegram_token, stats)
             logger.info("%s summary: %s", source, format_stats(stats))
             totals.update(stats)

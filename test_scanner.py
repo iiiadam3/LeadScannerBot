@@ -67,7 +67,7 @@ TOKEN = "fake-telegram-token"
 HOT_ENTRY = {
     "title": "Hiring a Python developer",
     "summary": "Budget is $500 for a Flask API",
-    "link": "https://reddit.com/r/forhire/abc",
+    "link": "https://example.com/jobs/abc",
     "published": "Mon, 01 Jan 2026",
 }
 
@@ -100,7 +100,7 @@ def notify():
 
 
 def run(conn, entry, patterns):
-    process_entry(conn, entry, "Reddit", {}, patterns, TOKEN)
+    process_entry(conn, entry, "TestSource", {}, patterns, TOKEN)
 
 
 @pytest.mark.parametrize("entry", [
@@ -167,7 +167,7 @@ def test_notification_threshold(score, should_notify, ai, notify):
     assert notify.called is should_notify
     if should_notify:
         token, chat_id, title, link, _, source = notify.call_args.args
-        assert (token, chat_id, link, source) == (TOKEN, "u1", HOT_ENTRY["link"], "Reddit")
+        assert (token, chat_id, link, source) == (TOKEN, "u1", HOT_ENTRY["link"], "TestSource")
         assert str(score) in title
 
 
@@ -220,7 +220,7 @@ from LeadScanner import fetch_feed, format_stats, send_telegram_notification
 
 def run_with_stats(conn, entry, patterns):
     stats = Counter()
-    process_entry(conn, entry, "Reddit", {}, patterns, TOKEN, stats)
+    process_entry(conn, entry, "TestSource", {}, patterns, TOKEN, stats)
     return stats
 
 
@@ -300,7 +300,7 @@ def test_stats_notify_failed(ai, notify):
 
 def test_process_entry_without_stats_still_works(ai, notify):
     conn, cur = make_conn()
-    process_entry(conn, HOT_ENTRY, "Reddit", {}, make_patterns(u1=["python"]), TOKEN)
+    process_entry(conn, HOT_ENTRY, "TestSource", {}, make_patterns(u1=["python"]), TOKEN)
     cur.execute.assert_called_once()
     notify.assert_called_once()
 
@@ -314,17 +314,17 @@ def test_format_stats_lists_every_key_with_zero_default():
 @patch("LeadScanner.requests.post")
 def test_send_telegram_notification_returns_true_on_success(mock_post):
     mock_post.return_value.raise_for_status.return_value = None
-    assert send_telegram_notification(TOKEN, "u1", "t", "l", "d", "Reddit") is True
+    assert send_telegram_notification(TOKEN, "u1", "t", "l", "d", "TestSource") is True
 
 
 @patch("LeadScanner.requests.post")
 def test_send_telegram_notification_returns_false_on_error(mock_post):
     mock_post.side_effect = requests.ConnectionError("down")
-    assert send_telegram_notification(TOKEN, "u1", "t", "l", "d", "Reddit") is False
+    assert send_telegram_notification(TOKEN, "u1", "t", "l", "d", "TestSource") is False
 
 
 def test_send_telegram_notification_returns_false_without_token():
-    assert send_telegram_notification(None, "u1", "t", "l", "d", "Reddit") is False
+    assert send_telegram_notification(None, "u1", "t", "l", "d", "TestSource") is False
 
 
 VALID_RSS = b"""<?xml version="1.0" encoding="UTF-8"?>
@@ -378,19 +378,21 @@ def test_fetch_feed_reports_bozo_reason_for_broken_xml(mock_get):
 
 
 @pytest.fixture
-def fake_main_env():
-    """Patch everything main() touches except the feed download."""
+def main_patches():
+    """Patch everything main() touches except the sources; yields a setter
+    that installs the list build_sources() returns."""
     conn, _ = make_conn()
-    with patch("LeadScanner.get_connection", return_value=conn), \
-         patch("LeadScanner.init_schema"), \
-         patch("LeadScanner.load_user_profiles", return_value={"u1": ["python"]}), \
-         patch("LeadScanner.build_feeds", return_value=[
-             {"source": "Reddit", "url": "https://example.com/r"},
-             {"source": "WeWorkRemotely", "url": "https://example.com/w"},
-         ]), \
-         patch("LeadScanner.get_ai_score", return_value=8), \
-         patch("LeadScanner.send_telegram_notification", return_value=True):
-        yield
+    with patch("LeadScanner.get_connection", return_value=conn),          patch("LeadScanner.init_schema"),          patch("LeadScanner.load_user_profiles", return_value={"u1": ["python"]}),          patch("LeadScanner.get_ai_score", return_value=8),          patch("LeadScanner.send_telegram_notification", return_value=True),          patch("LeadScanner.build_sources") as build:
+        yield lambda sources: setattr(build, "return_value", sources)
+
+
+@pytest.fixture
+def fake_main_env(main_patches):
+    """Two RSS sources; the download itself is left to requests.get."""
+    main_patches([
+        LeadScanner.rss_source("FeedA", "https://example.com/a"),
+        LeadScanner.rss_source("FeedB", "https://example.com/b"),
+    ])
 
 
 @patch("LeadScanner.requests.get")
@@ -403,12 +405,12 @@ def test_main_warns_on_empty_feed_and_logs_summaries(mock_get, fake_main_env, ca
         LeadScanner.main()
 
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-    assert any("Reddit returned 0 entries" in m and "text/html" in m for m in warnings)
+    assert any("FeedA returned 0 entries" in m and "text/html" in m for m in warnings)
 
     messages = [r.getMessage() for r in caplog.records]
-    assert any(m.startswith("Reddit: status=200") and "entries=0" in m for m in messages)
-    assert any(m.startswith("Reddit summary: entries=0") for m in messages)
-    assert any(m.startswith("WeWorkRemotely summary: entries=2") for m in messages)
+    assert any(m.startswith("FeedA: status=200") and "entries=0" in m for m in messages)
+    assert any(m.startswith("FeedA summary: entries=0") for m in messages)
+    assert any(m.startswith("FeedB summary: entries=2") for m in messages)
     assert any(m.startswith("Run totals: entries=2") for m in messages)
 
 
@@ -417,5 +419,54 @@ def test_main_does_not_log_feed_urls(mock_get, fake_main_env, caplog):
     mock_get.return_value = fake_response(VALID_RSS, "application/rss+xml")
     with caplog.at_level(logging.INFO, logger="leadscanner"):
         LeadScanner.main()
-    assert not any("example.com/r" in r.getMessage() or "example.com/w" in r.getMessage()
+    assert not any("example.com/a" in r.getMessage() or "example.com/b" in r.getMessage()
                    for r in caplog.records)
+
+
+# --- Sources ---
+def test_build_sources_has_no_reddit_and_every_source_is_callable():
+    sources = LeadScanner.build_sources()
+    assert sources
+    for s in sources:
+        assert callable(s["fetch"])
+        assert "reddit" not in s["source"].lower()
+
+
+@patch("LeadScanner.requests.get")
+def test_rss_source_returns_entries_and_meta(mock_get):
+    mock_get.return_value = fake_response(VALID_RSS, "application/rss+xml")
+    entries, meta = LeadScanner.rss_source("X", "https://example.com/x")["fetch"]()
+    assert [e["link"] for e in entries] == ["https://example.com/1", "https://example.com/2"]
+    assert meta["entries"] == 2
+    mock_get.assert_called_once()
+    assert mock_get.call_args.args[0] == "https://example.com/x"
+
+
+def plain_meta(n):
+    return {"status": 200, "content_type": "application/json", "bytes": 10,
+            "entries": n, "bozo": False, "bozo_reason": ""}
+
+
+def test_main_runs_a_non_rss_source(main_patches, caplog):
+    """A source only has to return (entries, meta); plain dicts work."""
+    entries = [{**HOT_ENTRY, "link": "https://example.com/j1"}]
+    main_patches([{"source": "JsonSource", "fetch": lambda: (entries, plain_meta(1))}])
+    with caplog.at_level(logging.INFO, logger="leadscanner"):
+        LeadScanner.main()
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(m.startswith("JsonSource summary: entries=1") and "notified=1" in m
+               for m in messages)
+
+
+def test_main_skips_a_failing_source_and_continues(main_patches, caplog):
+    def broken():
+        raise requests.ConnectionError("down")
+    main_patches([
+        {"source": "Broken", "fetch": broken},
+        {"source": "Works", "fetch": lambda: ([HOT_ENTRY], plain_meta(1))},
+    ])
+    with caplog.at_level(logging.INFO, logger="leadscanner"):
+        LeadScanner.main()
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(m == "Failed to fetch Broken" for m in messages)
+    assert any(m.startswith("Works summary: entries=1") for m in messages)
