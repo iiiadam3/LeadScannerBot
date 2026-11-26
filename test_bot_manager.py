@@ -10,6 +10,9 @@ import pytest
 
 # bot_manager refuses to load without a token, so give it a well-formed fake one.
 os.environ.setdefault("TELEGRAM_TOKEN", "123456:TEST-TOKEN")
+# Importing bot_manager creates the tables. An empty value (which load_dotenv does not
+# override) keeps a local .env from pointing the tests at the real database.
+os.environ["DATABASE_URL"] = ""
 
 import bot_manager  # noqa: E402
 
@@ -118,9 +121,41 @@ def test_a_telegram_outage_does_not_stop_the_service_starting(monkeypatch):
 def test_a_missing_token_says_so_in_plain_words(monkeypatch):
     """It used to fail with "'NoneType' object is not iterable", which named nothing."""
     monkeypatch.delenv("TELEGRAM_TOKEN", raising=False)
+    # A local .env would put the token back during the re-import, so stop it loading.
+    monkeypatch.setattr("dotenv.load_dotenv", lambda *args, **kwargs: False)
     sys.modules.pop("bot_manager", None)
     try:
         with pytest.raises(RuntimeError, match="TELEGRAM_TOKEN"):
             importlib.import_module("bot_manager")
     finally:
         sys.modules.pop("bot_manager", None)
+
+
+# ---------------------------------------------------------------------------
+# Schema setup at startup
+# ---------------------------------------------------------------------------
+def test_schema_is_created_through_the_shared_init_schema(monkeypatch):
+    from unittest.mock import MagicMock
+    conn = MagicMock()
+    created = []
+    monkeypatch.setattr(bot_manager, "DATABASE_URL", "postgres://fake")
+    monkeypatch.setattr(bot_manager.psycopg2, "connect", lambda *a, **kw: conn)
+    monkeypatch.setattr(bot_manager, "init_schema", created.append)
+
+    assert bot_manager.ensure_schema() is True
+    assert created == [conn]
+    conn.close.assert_called_once()
+
+
+def test_without_a_database_url_schema_setup_is_skipped(monkeypatch):
+    monkeypatch.setattr(bot_manager, "DATABASE_URL", "")
+    assert bot_manager.ensure_schema() is False
+
+
+def test_a_database_outage_does_not_stop_the_service_starting(monkeypatch):
+    def explode(*args, **kwargs):
+        raise bot_manager.psycopg2.OperationalError("database unreachable")
+
+    monkeypatch.setattr(bot_manager, "DATABASE_URL", "postgres://fake")
+    monkeypatch.setattr(bot_manager.psycopg2, "connect", explode)
+    assert bot_manager.ensure_schema() is False

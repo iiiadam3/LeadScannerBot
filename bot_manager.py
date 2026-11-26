@@ -8,6 +8,8 @@ import psycopg2
 from flask import Flask, request
 from dotenv import load_dotenv
 
+from db_schema import init_schema
+
 load_dotenv()
 
 logging.basicConfig(
@@ -104,6 +106,28 @@ def run_flask():
 
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
+
+
+# Short enough that an unreachable database cannot hold a gunicorn worker past its boot timeout.
+SCHEMA_CONNECT_TIMEOUT = 10
+
+
+def ensure_schema():
+    """
+    Create the tables the bot reads and writes, in case it starts on a fresh database
+    before the scanner has ever run. Like configure_webhook, a failure is logged and
+    the web service still starts.
+    """
+    if not DATABASE_URL:
+        logging.warning("DATABASE_URL is not set, so the database tables were not checked.")
+        return False
+    try:
+        with closing(psycopg2.connect(DATABASE_URL, connect_timeout=SCHEMA_CONNECT_TIMEOUT)) as conn:
+            init_schema(conn)
+    except Exception:
+        logging.exception("Could not create the database tables")
+        return False
+    return True
 
 
 # ==========================================
@@ -314,6 +338,8 @@ def delete_service(call):
 # Registered at import time on purpose: under a production server such as gunicorn
 # the __main__ block never runs, and the webhook must be set on every deploy.
 # With no WEBHOOK_URL/RENDER_EXTERNAL_URL (local use, tests) this only logs a warning.
+# The tables are created the same way, once per process at startup.
+ensure_schema()
 configure_webhook()
 
 
