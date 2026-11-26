@@ -10,8 +10,8 @@ pytest                                    # all tests (test_scanner.py, test_bot
 pytest test_scanner.py::test_notification_threshold   # single test
 pytest -k "ai_score"                      # tests matching a name
 python LeadScanner.py                     # one scan cycle (needs DATABASE_URL; OPENAI_API_KEY/TELEGRAM_TOKEN optional)
-python bot_manager.py                     # Flask dev server for the Telegram bot (PORT, default 10000)
-gunicorn bot_manager:app                  # how the bot runs in production (Render)
+python bot_manager.py                     # Flask server for the Telegram bot (PORT, default 10000); also the Render start command
+gunicorn bot_manager:app                  # alternative production server (not used on Render today)
 ```
 
 Env vars are loaded from a git-ignored `.env`: `TELEGRAM_TOKEN`, `DATABASE_URL`, `OPENAI_API_KEY`, and optionally `WEBHOOK_URL` (on Render, `RENDER_EXTERNAL_URL` is set automatically).
@@ -32,8 +32,8 @@ Two independent processes share one PostgreSQL database (Supabase). Neither impo
   1. Calls `init_schema`.
   2. Loads each user's keywords (`keywords` rows with `category = 'context'`) and compiles one regex per `chat_id`.
   3. Fetches the hardcoded RSS feeds in `build_feeds()` (a combined multi-subreddit Reddit feed and WeWorkRemotely) and runs `process_entry` on each item.
-- **`bot_manager.py`**: a Flask + pyTelegramBotAPI webhook server deployed on Render under gunicorn. Telegram POSTs to `/<TELEGRAM_TOKEN>`. Users add and delete keywords and view stats through inline-keyboard callbacks (`add_service`, `manage_services`, `del_srv_<digest>`, `menu_stats`, `main_menu`). It writes to `keywords` and reads `leads`.
-  - Importing the module has side effects, on purpose, because gunicorn never runs `__main__`: it raises `RuntimeError` if `TELEGRAM_TOKEN` is unset (the route is built from the token), then calls `ensure_schema()` (runs `init_schema` with a 10 s connect timeout) and `configure_webhook()` (registers `WEBHOOK_URL` or `RENDER_EXTERNAL_URL` with Telegram). Both log and return `False` on failure or missing config instead of stopping startup.
+- **`bot_manager.py`**: a Flask + pyTelegramBotAPI webhook server deployed on Render with the start command `python bot_manager.py`. Telegram POSTs to `/<TELEGRAM_TOKEN>`. Users add and delete keywords and view stats through inline-keyboard callbacks (`add_service`, `manage_services`, `del_srv_<digest>`, `menu_stats`, `main_menu`). It writes to `keywords` and reads `leads`.
+  - Importing the module has side effects, on purpose, so startup also works under a server such as gunicorn, which never runs `__main__`: it raises `RuntimeError` if `TELEGRAM_TOKEN` is unset (the route is built from the token), then calls `ensure_schema()` (runs `init_schema` with a 10 s connect timeout) and `configure_webhook()` (registers `WEBHOOK_URL` or `RENDER_EXTERNAL_URL` with Telegram). Both log and return `False` on failure or missing config instead of stopping startup.
   - Delete buttons carry `del_srv_` + a 16-char SHA-256 digest of the keyword (`service_token`), because Telegram caps `callback_data` at 64 bytes and Hebrew costs 2 bytes per letter. `delete_service` looks the keyword up by digest among the user's keywords.
   - User-supplied text goes through `escape_markdown` before being put into a Markdown message. Keywords are lowercased, stripped and capped at `MAX_KEYWORD_LENGTH = 60`.
 
